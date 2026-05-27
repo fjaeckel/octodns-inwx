@@ -40,8 +40,8 @@ providers:
     username: env/INWX_USERNAME
     # INWX API password (required)
     api_password: env/INWX_PASSWORD
-    # XML-RPC endpoint (optional, defaults to the production endpoint)
-    #endpoint: https://api.domrobot.com/xmlrpc/
+    # API endpoint base URL (optional, defaults to the production endpoint)
+    #endpoint: https://api.domrobot.com
 ```
 
 A dedicated API user with permission to manage the affected domains is recommended.

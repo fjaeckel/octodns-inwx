@@ -175,6 +175,25 @@ class INWXProviderTest(unittest.TestCase):
         self.assertIn(("www", "A"), records)
         self.assertIn(("", "A"), records)
 
+    def test_populate_bare_domain_name_treated_as_apex(self):
+        client = FakeClient(
+            records=[
+                {"id": 1, "name": "example.com", "type": "MX", "content": "mail.example.com.", "ttl": 3600, "prio": 10},
+                {"id": 2, "name": "example.com", "type": "NS", "content": "ns1.example.com.", "ttl": 86400},
+                {"id": 3, "name": "example.com", "type": "TXT", "content": "v=spf1 mx ~all", "ttl": 3600},
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        provider.populate(zone)
+        records = {(r.name, r._type): r for r in zone.records}
+        self.assertIn(("", "MX"), records)
+        self.assertIn(("", "NS"), records)
+        self.assertIn(("", "TXT"), records)
+        self.assertNotIn(("example.com", "MX"), records)
+        self.assertNotIn(("example.com", "NS"), records)
+        self.assertNotIn(("example.com", "TXT"), records)
+
     def test_populate_raises_on_invalid_srv(self):
         client = FakeClient(
             records=[{"id": 1, "name": "_x._tcp", "type": "SRV", "content": "bogus", "ttl": 300}]

@@ -131,7 +131,7 @@ class INWXProvider(BaseProvider):
     @staticmethod
     def _to_octodns_name(name, domain):
         name = (name or "").rstrip(".")
-        if name in ("", "@"):
+        if name in ("", "@", domain):
             return ""
         if name.endswith(f".{domain}"):
             return name[: -(len(domain) + 1)]

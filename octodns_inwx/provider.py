@@ -148,6 +148,18 @@ class INWXProvider(BaseProvider):
             return value[1:-1]
         return value
 
+    @staticmethod
+    def _ensure_fqdn(value):
+        # INWX strips the trailing dot from FQDN-valued fields (CNAME target,
+        # MX exchange, SRV target, NS host) on storage. octoDNS requires the
+        # canonical form with a trailing dot, so add it back when reading.
+        value = str(value)
+        if not value:
+            return value
+        if value.endswith("."):
+            return value
+        return f"{value}."
+
     @classmethod
     def _normalize_txt_content(cls, value):
         value = cls._normalize_content(value)
@@ -159,11 +171,18 @@ class INWXProvider(BaseProvider):
         return value.replace(r"\;", ";")
 
     def _record_data_from_group(self, record_type, ttl, rows):
-        if record_type in {"A", "AAAA", "NS"}:
+        if record_type in {"A", "AAAA"}:
             return {
                 "ttl": ttl,
                 "type": record_type,
                 "values": [str(row["content"]) for row in rows],
+            }
+
+        if record_type == "NS":
+            return {
+                "ttl": ttl,
+                "type": "NS",
+                "values": [self._ensure_fqdn(row["content"]) for row in rows],
             }
 
         if record_type == "TXT":
@@ -174,7 +193,11 @@ class INWXProvider(BaseProvider):
             }
 
         if record_type == "CNAME":
-            return {"ttl": ttl, "type": "CNAME", "value": str(rows[0]["content"])}
+            return {
+                "ttl": ttl,
+                "type": "CNAME",
+                "value": self._ensure_fqdn(rows[0]["content"]),
+            }
 
         if record_type == "MX":
             values = []
@@ -182,7 +205,7 @@ class INWXProvider(BaseProvider):
                 values.append(
                     {
                         "preference": int(row.get("prio", 0)),
-                        "exchange": str(row["content"]),
+                        "exchange": self._ensure_fqdn(row["content"]),
                     }
                 )
             values = sorted(values, key=lambda v: (v["preference"], v["exchange"]))
@@ -202,7 +225,7 @@ class INWXProvider(BaseProvider):
                         "priority": int(row.get("prio", 0)),
                         "weight": int(weight),
                         "port": int(port),
-                        "target": target,
+                        "target": self._ensure_fqdn(target),
                     }
                 )
             values = sorted(
@@ -326,7 +349,8 @@ class INWXProvider(BaseProvider):
     def _matches_payload(self, row, payload):
         if str(row.get("name") or "") != str(payload.get("name") or ""):
             return False
-        if str(row.get("type") or "").upper() != str(payload.get("type") or "").upper():
+        record_type = str(payload.get("type") or "").upper()
+        if str(row.get("type") or "").upper() != record_type:
             return False
         if int(row.get("ttl") or 0) != int(payload.get("ttl") or 0):
             return False
@@ -336,9 +360,19 @@ class INWXProvider(BaseProvider):
         if payload_prio is not None and int(row_prio or 0) != int(payload_prio):
             return False
 
-        return self._normalize_content(row.get("content")) == self._normalize_content(
-            payload.get("content")
-        )
+        row_content = self._normalize_content(row.get("content"))
+        payload_content = self._normalize_content(payload.get("content"))
+        # INWX returns FQDN-valued fields without the trailing dot it stripped on
+        # write — compare in a dot-insensitive way for those types.
+        if record_type in {"CNAME", "MX", "NS"}:
+            row_content = row_content.rstrip(".")
+            payload_content = payload_content.rstrip(".")
+        elif record_type == "SRV":
+            # SRV content is "<weight> <port> <target>"; only the target may
+            # differ by trailing dot.
+            row_content = row_content.rstrip(".")
+            payload_content = payload_content.rstrip(".")
+        return row_content == payload_content
 
     def _delete_record_payloads(self, current_rows, payloads):
         for payload in payloads:

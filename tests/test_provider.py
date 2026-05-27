@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from octodns.provider import ProviderException
 from octodns.record import Record
@@ -8,6 +8,7 @@ from octodns.record.change import Create, Delete, Update
 from octodns.zone import Zone
 
 from octodns_inwx import INWXProvider
+from octodns_inwx import provider as provider_module
 from octodns_inwx.provider import INWXClient
 
 
@@ -16,6 +17,7 @@ class FakeClient:
         self.records = records or []
         self.created = []
         self.deleted = []
+        self.logout_calls = 0
 
     def list_records(self, domain):
         return list(self.records)
@@ -25,6 +27,9 @@ class FakeClient:
 
     def delete_record(self, record_id):
         self.deleted.append(record_id)
+
+    def logout(self):
+        self.logout_calls += 1
 
 
 class INWXProviderTest(unittest.TestCase):
@@ -331,13 +336,14 @@ class INWXProviderTest(unittest.TestCase):
 
 class INWXClientTest(unittest.TestCase):
     def _patched_client(self, login_response):
-        domrobot_mock = MagicMock()
+        api_client_mock = MagicMock()
         inner = MagicMock()
-        inner.account.login.return_value = login_response
-        domrobot_mock.DOMRobot.return_value = inner
-        import sys
-        sys.modules["domrobot"] = domrobot_mock
-        return inner
+        inner.login.return_value = login_response
+        api_client_mock.return_value = inner
+        original = provider_module.ApiClient
+        provider_module.ApiClient = api_client_mock
+        self.addCleanup(setattr, provider_module, "ApiClient", original)
+        return api_client_mock, inner
 
     def test_login_failure_raises(self):
         self._patched_client({"code": 2000, "msg": "bad credentials"})
@@ -345,28 +351,62 @@ class INWXClientTest(unittest.TestCase):
             INWXClient("user", "pass")
 
     def test_list_create_delete_success(self):
-        inner = self._patched_client({"code": 1000})
-        inner.nameserver.info.return_value = {
-            "code": 1000,
-            "resData": {"record": [{"id": 1, "name": "@", "type": "A", "content": "1.2.3.4"}]},
-        }
-        inner.nameserver.createrecord.return_value = {"code": 1000}
-        inner.nameserver.deleterecord.return_value = {"code": 1000}
+        api_client_mock, inner = self._patched_client({"code": 1000})
+        inner.call_api.side_effect = [
+            {
+                "code": 1000,
+                "resData": {"record": [{"id": 1, "name": "@", "type": "A", "content": "1.2.3.4"}]},
+            },
+            {"code": 1000},
+            {"code": 1000},
+        ]
 
         client = INWXClient("user", "pass")
         rows = client.list_records("example.com")
         self.assertEqual(1, len(rows))
-        client.create_record("example.com", {"name": "@", "type": "A", "content": "1.2.3.4", "ttl": 300})
+        client.create_record(
+            "example.com", {"name": "@", "type": "A", "content": "1.2.3.4", "ttl": 300}
+        )
         client.delete_record(1)
-        inner.nameserver.createrecord.assert_called_once()
-        inner.nameserver.deleterecord.assert_called_once_with({"id": 1})
+        api_client_mock.assert_called_once_with(
+            api_url=provider_module.DEFAULT_ENDPOINT, debug_mode=False
+        )
+        inner.login.assert_called_once_with("user", "pass")
+        self.assertEqual(
+            [
+                call(api_method="nameserver.info", method_params={"domain": "example.com"}),
+                call(
+                    api_method="nameserver.createRecord",
+                    method_params={
+                        "domain": "example.com",
+                        "name": "@",
+                        "type": "A",
+                        "content": "1.2.3.4",
+                        "ttl": 300,
+                    },
+                ),
+                call(api_method="nameserver.deleteRecord", method_params={"id": 1}),
+            ],
+            inner.call_api.call_args_list,
+        )
 
     def test_api_failure_in_list_raises(self):
-        inner = self._patched_client({"code": 1000})
-        inner.nameserver.info.return_value = {"code": 2400, "msg": "boom"}
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 2400, "msg": "boom"}
         client = INWXClient("user", "pass")
         with self.assertRaises(ProviderException):
             client.list_records("example.com")
+
+    def test_logout_allows_future_relogin(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 1000, "resData": {"record": []}}
+        inner.logout.return_value = {"code": 1000}
+
+        client = INWXClient("user", "pass")
+        client.logout()
+        client.list_records("example.com")
+
+        self.assertEqual(2, inner.login.call_count)
 
 
 if __name__ == "__main__":

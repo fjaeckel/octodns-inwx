@@ -6,6 +6,16 @@ from octodns.provider.base import BaseProvider
 from octodns.record import Record
 from octodns.record.change import Create, Delete, Update
 
+try:
+    from INWX.Domrobot import ApiClient
+except ImportError:  # pragma: no cover - exercised when dependency is missing at runtime
+    ApiClient = None
+
+
+DEFAULT_ENDPOINT = (
+    ApiClient.API_LIVE_URL if ApiClient is not None else "https://api.domrobot.com"
+)
+
 
 class INWXClient:
     SUCCESS_CODE = 1000
@@ -14,18 +24,26 @@ class INWXClient:
         self,
         username,
         api_password,
-        endpoint="https://api.domrobot.com/xmlrpc/",
+        endpoint=DEFAULT_ENDPOINT,
     ):
-        try:
-            import domrobot
-        except ImportError as exc:
-            raise ProviderException("inwx-domrobot dependency is required") from exc
+        if ApiClient is None:
+            raise ProviderException("inwx-domrobot dependency is required")
 
-        self._client = domrobot.DOMRobot(endpoint)
-        response = self._client.account.login(
-            {"user": username, "pass": api_password}
-        )
+        self._username = username
+        self._api_password = api_password
+        self._client = ApiClient(api_url=endpoint, debug_mode=False)
+        self._logged_in = False
+        self._login()
+
+    def _login(self):
+        response = self._client.login(self._username, self._api_password)
         self._ensure_success(response, "account.login")
+        self._logged_in = True
+        return response
+
+    def _ensure_logged_in(self):
+        if not self._logged_in:
+            self._login()
 
     def _ensure_success(self, response, method):
         code = int(response.get("code", 0))
@@ -34,19 +52,36 @@ class INWXClient:
             raise ProviderException(f"{method} failed: {code} {message}")
 
     def list_records(self, domain):
-        response = self._client.nameserver.info({"domain": domain})
+        self._ensure_logged_in()
+        response = self._client.call_api(
+            api_method="nameserver.info", method_params={"domain": domain}
+        )
         self._ensure_success(response, "nameserver.info")
         return response.get("resData", {}).get("record", []) or []
 
     def create_record(self, domain, payload):
+        self._ensure_logged_in()
         data = {"domain": domain, **payload}
-        response = self._client.nameserver.createrecord(data)
-        self._ensure_success(response, "nameserver.createrecord")
+        response = self._client.call_api(
+            api_method="nameserver.createRecord", method_params=data
+        )
+        self._ensure_success(response, "nameserver.createRecord")
         return response
 
     def delete_record(self, record_id):
-        response = self._client.nameserver.deleterecord({"id": record_id})
-        self._ensure_success(response, "nameserver.deleterecord")
+        self._ensure_logged_in()
+        response = self._client.call_api(
+            api_method="nameserver.deleteRecord", method_params={"id": record_id}
+        )
+        self._ensure_success(response, "nameserver.deleteRecord")
+        return response
+
+    def logout(self):
+        if not self._logged_in:
+            return None
+        response = self._client.logout()
+        self._ensure_success(response, "account.logout")
+        self._logged_in = False
         return response
 
 
@@ -60,13 +95,14 @@ class INWXProvider(BaseProvider):
         id,
         username=None,
         api_password=None,
-        endpoint="https://api.domrobot.com/xmlrpc/",
+        endpoint=DEFAULT_ENDPOINT,
         client=None,
         *args,
         **kwargs,
     ):
         self.log = logging.getLogger(f"INWXProvider[{id}]")
         super().__init__(id, *args, **kwargs)
+        self._owns_client = client is None
         if client is not None:
             self._client = client
         else:
@@ -77,6 +113,13 @@ class INWXProvider(BaseProvider):
             self._client = INWXClient(
                 username=username, api_password=api_password, endpoint=endpoint
             )
+
+    def _cleanup_client(self):
+        if not self._owns_client:
+            return
+        logout = getattr(self._client, "logout", None)
+        if callable(logout):
+            logout()
 
     @staticmethod
     def _domain_for_zone(zone):
@@ -177,24 +220,27 @@ class INWXProvider(BaseProvider):
 
     def populate(self, zone, target=False, lenient=False):
         domain = self._domain_for_zone(zone)
-        rows = self._client.list_records(domain)
-        groups = defaultdict(list)
-        for row in rows:
-            record_type = str(row.get("type", "")).upper()
-            if record_type not in self.SUPPORTS:
-                continue
-            name = self._to_octodns_name(row.get("name"), domain)
-            ttl = int(row.get("ttl") or self.DEFAULT_TTL)
-            groups[(name, record_type, ttl)].append(row)
+        try:
+            rows = self._client.list_records(domain)
+            groups = defaultdict(list)
+            for row in rows:
+                record_type = str(row.get("type", "")).upper()
+                if record_type not in self.SUPPORTS:
+                    continue
+                name = self._to_octodns_name(row.get("name"), domain)
+                ttl = int(row.get("ttl") or self.DEFAULT_TTL)
+                groups[(name, record_type, ttl)].append(row)
 
-        for (name, record_type, ttl), grouped_rows in sorted(groups.items()):
-            data = self._record_data_from_group(record_type, ttl, grouped_rows)
-            if not data:
-                continue
-            record = Record.new(zone, name, data, source=self, lenient=lenient)
-            zone.add_record(record, lenient=lenient)
+            for (name, record_type, ttl), grouped_rows in sorted(groups.items()):
+                data = self._record_data_from_group(record_type, ttl, grouped_rows)
+                if not data:
+                    continue
+                record = Record.new(zone, name, data, source=self, lenient=lenient)
+                zone.add_record(record, lenient=lenient)
 
-        return True
+            return True
+        finally:
+            self._cleanup_client()
 
     def _record_to_api_payloads(self, record):
         name = self._to_inwx_name(record.name)
@@ -295,19 +341,24 @@ class INWXProvider(BaseProvider):
 
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)
-        current_rows = self._client.list_records(domain)
+        try:
+            current_rows = self._client.list_records(domain)
 
-        for change in plan.changes:
-            if isinstance(change, Delete):
-                payloads = self._record_to_api_payloads(change.existing)
-                self._delete_record_payloads(current_rows, payloads)
-            elif isinstance(change, Create):
-                for payload in self._record_to_api_payloads(change.new):
-                    self._client.create_record(domain, payload)
-            elif isinstance(change, Update):
-                existing_payloads = self._record_to_api_payloads(change.existing)
-                self._delete_record_payloads(current_rows, existing_payloads)
-                for payload in self._record_to_api_payloads(change.new):
-                    self._client.create_record(domain, payload)
-            else:
-                raise ProviderException(f"Unsupported change type {change.__class__.__name__}")
+            for change in plan.changes:
+                if isinstance(change, Delete):
+                    payloads = self._record_to_api_payloads(change.existing)
+                    self._delete_record_payloads(current_rows, payloads)
+                elif isinstance(change, Create):
+                    for payload in self._record_to_api_payloads(change.new):
+                        self._client.create_record(domain, payload)
+                elif isinstance(change, Update):
+                    existing_payloads = self._record_to_api_payloads(change.existing)
+                    self._delete_record_payloads(current_rows, existing_payloads)
+                    for payload in self._record_to_api_payloads(change.new):
+                        self._client.create_record(domain, payload)
+                else:
+                    raise ProviderException(
+                        f"Unsupported change type {change.__class__.__name__}"
+                    )
+        finally:
+            self._cleanup_client()

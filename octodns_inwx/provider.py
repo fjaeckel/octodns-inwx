@@ -485,10 +485,10 @@ class INWXProvider(BaseProvider):
                 row = current_rows.pop(match_index)
             elif fallback_row is not None:
                 current_rows.remove(fallback_row)
-                row = fallback_rowrow["id"]
+                row = fallback_row
             else:
                 continue
-            self._client.delete_record(int(row["id"]))
+            self._client.delete_record(row["id"])
 
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)

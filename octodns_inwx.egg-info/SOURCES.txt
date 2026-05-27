@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+octodns_inwx/__init__.py
+octodns_inwx/provider.py
+octodns_inwx.egg-info/PKG-INFO
+octodns_inwx.egg-info/SOURCES.txt
+octodns_inwx.egg-info/dependency_links.txt
+octodns_inwx.egg-info/requires.txt
+octodns_inwx.egg-info/top_level.txt
+tests/test_provider.py

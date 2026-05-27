@@ -9,8 +9,8 @@ description = "First-class octoDNS provider for INWX"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-  "octodns>=1.11.0",
-  "inwx-domrobot>=0.14.0",
+  "octodns>=1.18.0",
+  "inwx-domrobot>=3.2.0",
 ]
 
 [tool.ruff]

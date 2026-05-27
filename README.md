@@ -18,7 +18,7 @@ Pinning specific versions or SHAs is recommended to avoid unplanned upgrades.
 
 ```
 # Start with the latest versions and don't just copy what's here
-octodns==1.11.0
+octodns==1.18.0
 octodns-inwx==0.1.0
 ```
 

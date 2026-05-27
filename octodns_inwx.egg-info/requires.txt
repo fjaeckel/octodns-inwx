@@ -1,2 +1,0 @@
-octodns>=1.11.0
-inwx-domrobot>=0.14.0

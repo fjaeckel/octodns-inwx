@@ -12,3 +12,14 @@ dependencies = [
   "octodns>=1.11.0",
   "inwx-domrobot>=0.14.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

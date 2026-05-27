@@ -71,8 +71,11 @@ class INWXClient:
 
     def delete_record(self, record_id):
         self._ensure_logged_in()
+        # INWX returns record ids as strings and they can exceed the XML-RPC
+        # <int> range (signed 32-bit). Forward the value as-is so xmlrpc.client
+        # marshals it as <string>, which the INWX backend accepts.
         response = self._client.call_api(
-            api_method="nameserver.deleteRecord", method_params={"id": record_id}
+            api_method="nameserver.deleteRecord", method_params={"id": str(record_id)}
         )
         self._ensure_success(response, "nameserver.deleteRecord")
         return response
@@ -403,8 +406,25 @@ class INWXProvider(BaseProvider):
 
         raise ProviderException(f"Unsupported record type {record_type}")
 
-    def _matches_payload(self, row, payload):
-        if str(row.get("name") or "") != str(payload.get("name") or ""):
+    def _names_equal(self, row_name, payload_name, domain=None):
+        row = str(row_name or "").rstrip(".")
+        pay = str(payload_name or "").rstrip(".")
+        if row == pay:
+            return True
+        if domain is None:
+            return False
+        # nameserver.info returns the row's name as the full FQDN, while
+        # payloads built for nameserver.createRecord use the short form ('@'
+        # for the apex, otherwise the relative label). Translate the row to
+        # the same short form before comparing so deletes can find the right
+        # record.
+        row_apex = row == domain
+        if pay == "@":
+            return row_apex
+        return row == f"{pay}.{domain}"
+
+    def _matches_payload(self, row, payload, domain=None):
+        if not self._names_equal(row.get("name"), payload.get("name"), domain):
             return False
         record_type = str(payload.get("type") or "").upper()
         if str(row.get("type") or "").upper() != record_type:
@@ -445,18 +465,20 @@ class INWXProvider(BaseProvider):
             f"{cls._normalize_tlsa_data(cert_data)}"
         )
 
-    def _delete_record_payloads(self, current_rows, payloads):
+    def _delete_record_payloads(self, current_rows, payloads, domain=None):
         for payload in payloads:
             fallback_row = None
             match_index = None
             for index, row in enumerate(current_rows):
                 if (
-                    str(row.get("name") or "") == str(payload.get("name") or "")
+                    self._names_equal(
+                        row.get("name"), payload.get("name"), domain
+                    )
                     and str(row.get("type") or "").upper()
                     == str(payload.get("type") or "").upper()
                 ):
                     fallback_row = row
-                    if self._matches_payload(row, payload):
+                    if self._matches_payload(row, payload, domain):
                         match_index = index
                         break
             if match_index is not None:
@@ -466,7 +488,7 @@ class INWXProvider(BaseProvider):
                 row = fallback_row
             else:
                 continue
-            self._client.delete_record(int(row["id"]))
+            self._client.delete_record(row["id"])
 
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)
@@ -476,13 +498,15 @@ class INWXProvider(BaseProvider):
             for change in plan.changes:
                 if isinstance(change, Delete):
                     payloads = self._record_to_api_payloads(change.existing)
-                    self._delete_record_payloads(current_rows, payloads)
+                    self._delete_record_payloads(current_rows, payloads, domain)
                 elif isinstance(change, Create):
                     for payload in self._record_to_api_payloads(change.new):
                         self._client.create_record(domain, payload)
                 elif isinstance(change, Update):
                     existing_payloads = self._record_to_api_payloads(change.existing)
-                    self._delete_record_payloads(current_rows, existing_payloads)
+                    self._delete_record_payloads(
+                        current_rows, existing_payloads, domain
+                    )
                     for payload in self._record_to_api_payloads(change.new):
                         self._client.create_record(domain, payload)
                 else:

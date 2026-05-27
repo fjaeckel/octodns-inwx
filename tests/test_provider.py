@@ -47,7 +47,7 @@ class INWXProviderTest(unittest.TestCase):
                     "id": 3,
                     "name": "www",
                     "type": "TXT",
-                    "content": "v=spf1 -all",
+                    "content": '"v=spf1 -all"',
                     "ttl": 300,
                 },
                 {

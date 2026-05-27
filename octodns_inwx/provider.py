@@ -103,11 +103,18 @@ class INWXProvider(BaseProvider):
         return value
 
     def _record_data_from_group(self, record_type, ttl, rows):
-        if record_type in {"A", "AAAA", "NS", "TXT"}:
+        if record_type in {"A", "AAAA", "NS"}:
             return {
                 "ttl": ttl,
                 "type": record_type,
                 "values": [str(row["content"]) for row in rows],
+            }
+
+        if record_type == "TXT":
+            return {
+                "ttl": ttl,
+                "type": "TXT",
+                "values": [self._normalize_content(row["content"]) for row in rows],
             }
 
         if record_type == "CNAME":

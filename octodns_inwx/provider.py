@@ -67,7 +67,7 @@ class INWXProvider(BaseProvider):
         else:
             if not username or not api_password:
                 raise ProviderException(
-                    "username and password are required when no client is provided"
+                    "username and api_password are required when no client is provided"
                 )
             self._client = INWXClient(
                 username=username, secret=api_password, endpoint=endpoint

@@ -15,5 +15,5 @@ providers:
   inwx:
     class: octodns_inwx.INWXProvider
     username: env/INWX_USERNAME
-    password: env/INWX_PASSWORD
+    api_password: env/INWX_PASSWORD
 ```

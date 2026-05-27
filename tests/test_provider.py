@@ -52,6 +52,21 @@ class INWXProviderTest(unittest.TestCase):
                 },
                 {
                     "id": 4,
+                    "name": "_sip._tcp",
+                    "type": "SRV",
+                    "content": "10 443 sip.example.com.",
+                    "ttl": 300,
+                    "prio": 5,
+                },
+                {
+                    "id": 5,
+                    "name": "@",
+                    "type": "CAA",
+                    "content": '0 issue "letsencrypt.org"',
+                    "ttl": 300,
+                },
+                {
+                    "id": 6,
                     "name": "www",
                     "type": "UNKNOWN",
                     "content": "ignored",
@@ -70,6 +85,11 @@ class INWXProviderTest(unittest.TestCase):
         self.assertEqual("v=spf1 -all", records[("www", "TXT")].values[0])
         self.assertEqual(10, records[("", "MX")].values[0].preference)
         self.assertEqual("mx1.example.com", records[("", "MX")].values[0].exchange)
+        self.assertEqual(5, records[("_sip._tcp", "SRV")].values[0].priority)
+        self.assertEqual(443, records[("_sip._tcp", "SRV")].values[0].port)
+        self.assertEqual("sip.example.com.", records[("_sip._tcp", "SRV")].values[0].target)
+        self.assertEqual("issue", records[("", "CAA")].values[0].tag)
+        self.assertEqual("letsencrypt.org", records[("", "CAA")].values[0].value)
         self.assertNotIn(("www", "UNKNOWN"), records)
 
     def test_apply_update_recreates_records(self):
@@ -115,6 +135,32 @@ class INWXProviderTest(unittest.TestCase):
 
         self.assertEqual(
             [("example.com", {"name": "@", "type": "TXT", "content": "hello world", "ttl": 300})],
+            client.created,
+        )
+
+    def test_apply_update_txt_matches_quoted_current_content(self):
+        client = FakeClient(
+            records=[
+                {
+                    "id": 42,
+                    "name": "@",
+                    "type": "TXT",
+                    "content": '"old value"',
+                    "ttl": 300,
+                }
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        existing = Record.new(zone, "", {"ttl": 300, "type": "TXT", "value": "old value"})
+        new = Record.new(zone, "", {"ttl": 300, "type": "TXT", "value": "new value"})
+        plan = SimpleNamespace(desired=zone, changes=[Update(existing, new)])
+
+        provider._apply(plan)
+
+        self.assertEqual([42], client.deleted)
+        self.assertEqual(
+            [("example.com", {"name": "@", "type": "TXT", "content": "new value", "ttl": 300})],
             client.created,
         )
 

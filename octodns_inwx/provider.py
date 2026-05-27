@@ -13,7 +13,7 @@ class INWXClient:
     def __init__(
         self,
         username,
-        secret,
+        api_password,
         endpoint="https://api.domrobot.com/xmlrpc/",
     ):
         try:
@@ -22,7 +22,9 @@ class INWXClient:
             raise ProviderException("inwx-domrobot dependency is required") from exc
 
         self._client = domrobot.DOMRobot(endpoint)
-        response = self._client.account.login({"user": username, "pass": secret})
+        response = self._client.account.login(
+            {"user": username, "pass": api_password}
+        )
         self._ensure_success(response, "account.login")
 
     def _ensure_success(self, response, method):
@@ -73,7 +75,7 @@ class INWXProvider(BaseProvider):
                     "username and api_password are required when no client is provided"
                 )
             self._client = INWXClient(
-                username=username, secret=api_password, endpoint=endpoint
+                username=username, api_password=api_password, endpoint=endpoint
             )
 
     @staticmethod

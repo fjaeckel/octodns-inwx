@@ -100,7 +100,7 @@ class INWXProviderTest(unittest.TestCase):
         self.assertEqual("192.0.2.10", records[("www", "A")].values[0])
         self.assertEqual("v=spf1 -all", records[("www", "TXT")].values[0])
         self.assertEqual(10, records[("", "MX")].values[0].preference)
-        self.assertEqual("mx1.example.com", records[("", "MX")].values[0].exchange)
+        self.assertEqual("mx1.example.com.", records[("", "MX")].values[0].exchange)
         self.assertEqual(5, records[("_sip._tcp", "SRV")].values[0].priority)
         self.assertEqual(443, records[("_sip._tcp", "SRV")].values[0].port)
         self.assertEqual("sip.example.com.", records[("_sip._tcp", "SRV")].values[0].target)
@@ -193,6 +193,26 @@ class INWXProviderTest(unittest.TestCase):
         self.assertNotIn(("example.com", "MX"), records)
         self.assertNotIn(("example.com", "NS"), records)
         self.assertNotIn(("example.com", "TXT"), records)
+
+    def test_populate_adds_trailing_dot_to_fqdn_targets(self):
+        # INWX strips trailing dots from FQDN-valued fields on storage; the
+        # provider must add them back so octoDNS sees canonical FQDNs.
+        client = FakeClient(
+            records=[
+                {"id": 1, "name": "alias", "type": "CNAME", "content": "target.example.com", "ttl": 600},
+                {"id": 2, "name": "@", "type": "MX", "content": "mx.example.com", "ttl": 3600, "prio": 10},
+                {"id": 3, "name": "sub", "type": "NS", "content": "ns1.example.com", "ttl": 86400},
+                {"id": 4, "name": "_sip._tcp", "type": "SRV", "content": "10 443 sip.example.com", "ttl": 300, "prio": 5},
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        provider.populate(zone)
+        records = {(r.name, r._type): r for r in zone.records}
+        self.assertEqual("target.example.com.", records[("alias", "CNAME")].value)
+        self.assertEqual("mx.example.com.", records[("", "MX")].values[0].exchange)
+        self.assertEqual(["ns1.example.com."], records[("sub", "NS")].values)
+        self.assertEqual("sip.example.com.", records[("_sip._tcp", "SRV")].values[0].target)
 
     def test_populate_raises_on_invalid_srv(self):
         client = FakeClient(
@@ -406,6 +426,48 @@ class INWXProviderTest(unittest.TestCase):
         plan = SimpleNamespace(desired=zone, changes=[object()])
         with self.assertRaises(ProviderException):
             provider._apply(plan)
+
+    def test_apply_update_cname_matches_dotless_current_target(self):
+        # The existing INWX row stores the target without trailing dot; the
+        # update should still locate and delete the correct row by id.
+        client = FakeClient(
+            records=[
+                {
+                    "id": 77,
+                    "name": "alias",
+                    "type": "CNAME",
+                    "content": "old.example.com",
+                    "ttl": 600,
+                }
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        existing = Record.new(
+            zone, "alias", {"ttl": 600, "type": "CNAME", "value": "old.example.com."}
+        )
+        new = Record.new(
+            zone, "alias", {"ttl": 600, "type": "CNAME", "value": "new.example.com."}
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Update(existing, new)])
+
+        provider._apply(plan)
+
+        self.assertEqual([77], client.deleted)
+        self.assertEqual(
+            [
+                (
+                    "example.com",
+                    {
+                        "name": "alias",
+                        "type": "CNAME",
+                        "content": "new.example.com.",
+                        "ttl": 600,
+                    },
+                )
+            ],
+            client.created,
+        )
 
 
 class INWXClientTest(unittest.TestCase):

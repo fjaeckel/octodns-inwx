@@ -409,6 +409,15 @@ class INWXClientTest(unittest.TestCase):
         inner.logout.assert_called_once_with()
         self.assertEqual(2, inner.login.call_count)
 
+    def test_logout_failure_raises(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.logout.return_value = {"code": 2000, "msg": "logout failed"}
+
+        client = INWXClient("user", "pass")
+
+        with self.assertRaises(ProviderException):
+            client.logout()
+
 
 if __name__ == "__main__":
     unittest.main()

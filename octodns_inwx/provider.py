@@ -13,9 +13,7 @@ except ImportError:  # pragma: no cover - exercised when dependency is missing a
 
 
 API_LIVE_URL = "https://api.domrobot.com"
-DEFAULT_ENDPOINT = (
-    ApiClient.API_LIVE_URL if ApiClient is not None else API_LIVE_URL
-)
+DEFAULT_ENDPOINT = getattr(ApiClient, "API_LIVE_URL", API_LIVE_URL)
 
 
 class INWXClient:
@@ -81,8 +79,8 @@ class INWXClient:
         if not self._logged_in:
             return None
         response = self._client.logout()
-        self._logged_in = False
         self._ensure_success(response, "account.logout")
+        self._logged_in = False
         return response
 
 

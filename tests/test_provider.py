@@ -406,6 +406,7 @@ class INWXClientTest(unittest.TestCase):
         client.logout()
         client.list_records("example.com")
 
+        inner.logout.assert_called_once_with()
         self.assertEqual(2, inner.login.call_count)
 
 

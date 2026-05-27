@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "octodns-inwx"
+version = "0.1.0"
+description = "First-class octoDNS provider for INWX"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "octodns>=1.11.0",
+  "inwx-domrobot>=0.14.0",
+]

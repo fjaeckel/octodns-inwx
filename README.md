@@ -50,7 +50,7 @@ A dedicated API user with permission to manage the affected domains is recommend
 
 #### Records
 
-INWXProvider supports A, AAAA, CAA, CNAME, MX, NS, SRV, and TXT.
+INWXProvider supports A, AAAA, CAA, CNAME, MX, NS, SRV, TLSA, and TXT.
 
 #### Dynamic
 

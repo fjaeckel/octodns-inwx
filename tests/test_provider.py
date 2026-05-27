@@ -559,5 +559,128 @@ class INWXClientTest(unittest.TestCase):
             client.logout()
 
 
+class INWXProviderTlsaTest(unittest.TestCase):
+    _HEX = "3605d0184c472ef86272aaa17a31f3f5c57c43552ff2f79540dd4ba03a578772"
+
+    def test_populate_loads_tlsa_record(self):
+        # INWX may return the cert association hex with whitespace and/or in
+        # upper case; both should normalize to the canonical lower-case form.
+        client = FakeClient(
+            records=[
+                {
+                    "id": 1,
+                    "name": "_25._tcp.mail",
+                    "type": "TLSA",
+                    "content": (
+                        "3 1 1 "
+                        "3605D0184C472EF86272AAA17A31F3F5C57C43552FF2F79540DD4BA0"
+                        " 3A578772"
+                    ),
+                    "ttl": 3600,
+                }
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+
+        provider.populate(zone)
+
+        record = next(iter(zone.records))
+        self.assertEqual("TLSA", record._type)
+        self.assertEqual("_25._tcp.mail", record.name)
+        value = record.values[0]
+        self.assertEqual(3, value.certificate_usage)
+        self.assertEqual(1, value.selector)
+        self.assertEqual(1, value.matching_type)
+        self.assertEqual(self._HEX, value.certificate_association_data)
+
+    def test_invalid_tlsa_content_raises(self):
+        client = FakeClient(
+            records=[
+                {
+                    "id": 1,
+                    "name": "_25._tcp.mail",
+                    "type": "TLSA",
+                    "content": "3 1 1",  # missing cert data
+                    "ttl": 3600,
+                }
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+
+        with self.assertRaises(ProviderException):
+            provider.populate(zone)
+
+    def test_apply_create_tlsa(self):
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "_25._tcp.mail",
+            {
+                "ttl": 3600,
+                "type": "TLSA",
+                "value": {
+                    "certificate_usage": 3,
+                    "selector": 1,
+                    "matching_type": 1,
+                    "certificate_association_data": self._HEX,
+                },
+            },
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Create(record)])
+
+        provider._apply(plan)
+
+        self.assertEqual(1, len(client.created))
+        domain, payload = client.created[0]
+        self.assertEqual("example.com", domain)
+        self.assertEqual("_25._tcp.mail", payload["name"])
+        self.assertEqual("TLSA", payload["type"])
+        self.assertEqual(f"3 1 1 {self._HEX}", payload["content"])
+        self.assertEqual(3600, payload["ttl"])
+
+    def test_apply_update_tlsa_matches_whitespace_and_case_variations(self):
+        # Existing INWX row returns the cert blob with a wrap space and upper
+        # case; the desired value uses the canonical lower-case form. They
+        # represent the same record so an Update with identical values should
+        # not produce any change (matches the existing row exactly and avoids
+        # spurious deletes/creates).
+        existing_row = {
+            "id": 7,
+            "name": "_25._tcp.mail",
+            "type": "TLSA",
+            "content": (
+                "3 1 1 "
+                "3605D0184C472EF86272AAA17A31F3F5C57C43552FF2F79540DD4BA0"
+                " 3A578772"
+            ),
+            "ttl": 3600,
+        }
+        client = FakeClient(records=[existing_row])
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        existing = Record.new(
+            zone,
+            "_25._tcp.mail",
+            {
+                "ttl": 3600,
+                "type": "TLSA",
+                "value": {
+                    "certificate_usage": 3,
+                    "selector": 1,
+                    "matching_type": 1,
+                    "certificate_association_data": self._HEX,
+                },
+            },
+        )
+        # _matches_payload should treat whitespace-wrapped/upper-case hex as
+        # equivalent to the canonical form.
+        payload = provider._record_to_api_payloads(existing)[0]
+        self.assertTrue(provider._matches_payload(existing_row, payload))
+
+
 if __name__ == "__main__":
     unittest.main()

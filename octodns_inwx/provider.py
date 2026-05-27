@@ -89,7 +89,7 @@ class INWXClient:
 
 
 class INWXProvider(BaseProvider):
-    SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TXT"}
+    SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
     DEFAULT_TTL = 3600
 
@@ -159,6 +159,14 @@ class INWXProvider(BaseProvider):
         if value.endswith("."):
             return value
         return f"{value}."
+
+    @staticmethod
+    def _normalize_tlsa_data(value):
+        # INWX (and some zone exports) may wrap the certificate association
+        # hex blob across whitespace; octoDNS expects a single contiguous
+        # string. Comparisons are case-insensitive so lower-case here for a
+        # stable canonical form.
+        return "".join(str(value).split()).lower()
 
     @classmethod
     def _normalize_txt_content(cls, value):
@@ -252,6 +260,36 @@ class INWXProvider(BaseProvider):
             values = sorted(values, key=lambda v: (v["flags"], v["tag"], v["value"]))
             return {"ttl": ttl, "type": "CAA", "values": values}
 
+        if record_type == "TLSA":
+            values = []
+            for row in rows:
+                parts = str(row["content"]).split(maxsplit=3)
+                if len(parts) != 4:
+                    raise ProviderException(
+                        f"Invalid TLSA content from INWX for {row.get('name', '@')}: {row.get('content')}"
+                    )
+                usage, selector, matching_type, cert_data = parts
+                values.append(
+                    {
+                        "certificate_usage": int(usage),
+                        "selector": int(selector),
+                        "matching_type": int(matching_type),
+                        "certificate_association_data": self._normalize_tlsa_data(
+                            cert_data
+                        ),
+                    }
+                )
+            values = sorted(
+                values,
+                key=lambda v: (
+                    v["certificate_usage"],
+                    v["selector"],
+                    v["matching_type"],
+                    v["certificate_association_data"],
+                ),
+            )
+            return {"ttl": ttl, "type": "TLSA", "values": values}
+
         return None
 
     def populate(self, zone, target=False, lenient=False):
@@ -344,6 +382,25 @@ class INWXProvider(BaseProvider):
                 )
             return payloads
 
+        if record_type == "TLSA":
+            payloads = []
+            for value in record.values:
+                cert_data = self._normalize_tlsa_data(
+                    value.certificate_association_data
+                )
+                payloads.append(
+                    {
+                        "name": name,
+                        "type": "TLSA",
+                        "content": (
+                            f"{value.certificate_usage} {value.selector} "
+                            f"{value.matching_type} {cert_data}"
+                        ),
+                        "ttl": ttl,
+                    }
+                )
+            return payloads
+
         raise ProviderException(f"Unsupported record type {record_type}")
 
     def _matches_payload(self, row, payload):
@@ -372,7 +429,21 @@ class INWXProvider(BaseProvider):
             # differ by trailing dot.
             row_content = row_content.rstrip(".")
             payload_content = payload_content.rstrip(".")
+        elif record_type == "TLSA":
+            row_content = self._canonicalize_tlsa_content(row_content)
+            payload_content = self._canonicalize_tlsa_content(payload_content)
         return row_content == payload_content
+
+    @classmethod
+    def _canonicalize_tlsa_content(cls, content):
+        parts = str(content).split(maxsplit=3)
+        if len(parts) != 4:
+            return content
+        usage, selector, matching_type, cert_data = parts
+        return (
+            f"{int(usage)} {int(selector)} {int(matching_type)} "
+            f"{cls._normalize_tlsa_data(cert_data)}"
+        )
 
     def _delete_record_payloads(self, current_rows, payloads):
         for payload in payloads:

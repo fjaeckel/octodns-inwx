@@ -51,6 +51,7 @@ class INWXClient:
 class INWXProvider(BaseProvider):
     SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TXT"}
     SUPPORTS_GEO = False
+    DEFAULT_TTL = 3600
 
     def __init__(
         self,
@@ -95,7 +96,7 @@ class INWXProvider(BaseProvider):
     @staticmethod
     def _normalize_content(value):
         value = str(value)
-        if len(value) >= 2 and value[0] == value[-1] == '"':
+        if len(value) > 1 and value[0] == value[-1] == '"':
             return value[1:-1]
         return value
 
@@ -174,7 +175,7 @@ class INWXProvider(BaseProvider):
             if record_type not in self.SUPPORTS:
                 continue
             name = self._to_octodns_name(row.get("name"), domain)
-            ttl = int(row.get("ttl") or 3600)
+            ttl = int(row.get("ttl") or self.DEFAULT_TTL)
             groups[(name, record_type, ttl)].append(row)
 
         for (name, record_type, ttl), grouped_rows in sorted(groups.items()):

@@ -8,6 +8,8 @@ from octodns.record.change import Create, Delete, Update
 
 
 class INWXClient:
+    SUCCESS_CODE = 1000
+
     def __init__(
         self,
         username,
@@ -25,7 +27,7 @@ class INWXClient:
 
     def _ensure_success(self, response, method):
         code = int(response.get("code", 0))
-        if code != 1000:
+        if code != self.SUCCESS_CODE:
             message = response.get("msg", "unknown INWX API error")
             raise ProviderException(f"{method} failed: {code} {message}")
 
@@ -123,7 +125,12 @@ class INWXProvider(BaseProvider):
         if record_type == "SRV":
             values = []
             for row in rows:
-                weight, port, target = str(row["content"]).split(maxsplit=2)
+                parts = str(row["content"]).split(maxsplit=2)
+                if len(parts) != 3:
+                    raise ProviderException(
+                        f"Invalid SRV content from INWX for {row.get('name', '@')}: {row.get('content')}"
+                    )
+                weight, port, target = parts
                 values.append(
                     {
                         "priority": int(row.get("prio", 0)),
@@ -140,7 +147,12 @@ class INWXProvider(BaseProvider):
         if record_type == "CAA":
             values = []
             for row in rows:
-                flags, tag, value = str(row["content"]).split(maxsplit=2)
+                parts = str(row["content"]).split(maxsplit=2)
+                if len(parts) != 3:
+                    raise ProviderException(
+                        f"Invalid CAA content from INWX for {row.get('name', '@')}: {row.get('content')}"
+                    )
+                flags, tag, value = parts
                 values.append(
                     {
                         "flags": int(flags),

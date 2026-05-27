@@ -138,6 +138,29 @@ class INWXProviderTest(unittest.TestCase):
         records = {(r.name, r._type): r for r in zone.records}
         self.assertEqual(INWXProvider.DEFAULT_TTL, records[("www", "A")].ttl)
 
+    def test_populate_escapes_txt_semicolons(self):
+        client = FakeClient(
+            records=[
+                {
+                    "id": 1,
+                    "name": "_dmarc",
+                    "type": "TXT",
+                    "content": "v=DMARC1; p=quarantine; adkim=r; aspf=r; sp=quarantine",
+                    "ttl": 300,
+                }
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+
+        provider.populate(zone)
+
+        records = {(r.name, r._type): r for r in zone.records}
+        self.assertEqual(
+            [r"v=DMARC1\; p=quarantine\; adkim=r\; aspf=r\; sp=quarantine"],
+            records[("_dmarc", "TXT")].values,
+        )
+
     def test_populate_full_qualified_names_are_stripped(self):
         client = FakeClient(
             records=[
@@ -213,6 +236,38 @@ class INWXProviderTest(unittest.TestCase):
 
         self.assertEqual(
             [("example.com", {"name": "@", "type": "TXT", "content": "hello world", "ttl": 300})],
+            client.created,
+        )
+
+    def test_apply_create_txt_unescapes_semicolons(self):
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "_dmarc",
+            {
+                "ttl": 300,
+                "type": "TXT",
+                "value": r"v=DMARC1\; p=quarantine\; adkim=r\; aspf=r\; sp=quarantine",
+            },
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Create(record)])
+
+        provider._apply(plan)
+
+        self.assertEqual(
+            [
+                (
+                    "example.com",
+                    {
+                        "name": "_dmarc",
+                        "type": "TXT",
+                        "content": "v=DMARC1; p=quarantine; adkim=r; aspf=r; sp=quarantine",
+                        "ttl": 300,
+                    },
+                )
+            ],
             client.created,
         )
 
@@ -400,7 +455,10 @@ class INWXClientTest(unittest.TestCase):
     def test_logout_allows_future_relogin(self):
         _, inner = self._patched_client({"code": 1000})
         inner.call_api.return_value = {"code": 1000, "resData": {"record": []}}
-        inner.logout.return_value = {"code": 1000}
+        inner.logout.return_value = {
+            "code": 1500,
+            "msg": "Command completed successfully; ending session",
+        }
 
         client = INWXClient("user", "pass")
         client.logout()

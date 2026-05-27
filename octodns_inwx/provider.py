@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import defaultdict
 
 from octodns.provider import ProviderException
@@ -18,6 +19,7 @@ DEFAULT_ENDPOINT = getattr(ApiClient, "API_LIVE_URL", API_LIVE_URL)
 
 class INWXClient:
     SUCCESS_CODE = 1000
+    LOGOUT_SUCCESS_CODES = {SUCCESS_CODE, 1500}
 
     def __init__(
         self,
@@ -79,7 +81,9 @@ class INWXClient:
         if not self._logged_in:
             return None
         response = self._client.logout()
-        self._ensure_success(response, "account.logout")
+        code = int(response.get("code", 0))
+        if code not in self.LOGOUT_SUCCESS_CODES:
+            self._ensure_success(response, "account.logout")
         self._logged_in = False
         return response
 
@@ -144,6 +148,16 @@ class INWXProvider(BaseProvider):
             return value[1:-1]
         return value
 
+    @classmethod
+    def _normalize_txt_content(cls, value):
+        value = cls._normalize_content(value)
+        return re.sub(r"(?<!\\);", r"\\;", value)
+
+    @classmethod
+    def _serialize_txt_content(cls, value):
+        value = cls._normalize_content(value)
+        return value.replace(r"\;", ";")
+
     def _record_data_from_group(self, record_type, ttl, rows):
         if record_type in {"A", "AAAA", "NS"}:
             return {
@@ -156,7 +170,7 @@ class INWXProvider(BaseProvider):
             return {
                 "ttl": ttl,
                 "type": "TXT",
-                "values": [self._normalize_content(row["content"]) for row in rows],
+                "values": [self._normalize_txt_content(row["content"]) for row in rows],
             }
 
         if record_type == "CNAME":
@@ -246,9 +260,20 @@ class INWXProvider(BaseProvider):
         record_type = record._type
         ttl = int(record.ttl)
 
-        if record_type in {"A", "AAAA", "NS", "TXT"}:
+        if record_type in {"A", "AAAA", "NS"}:
             return [
                 {"name": name, "type": record_type, "content": value, "ttl": ttl}
+                for value in record.values
+            ]
+
+        if record_type == "TXT":
+            return [
+                {
+                    "name": name,
+                    "type": "TXT",
+                    "content": self._serialize_txt_content(value),
+                    "ttl": ttl,
+                }
                 for value in record.values
             ]
 

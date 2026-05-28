@@ -507,6 +507,30 @@ class INWXProvider(BaseProvider):
                 continue
             self._client.delete_record(row["id"])
 
+    def _delete_all_rows_for(self, current_rows, name, record_type):
+        """Delete every row of the given (name, type) regardless of content.
+
+        Used for ``Delete`` changes where the entire RRset is going away --
+        this is robust to single-valued types (CNAME) accidentally having
+        multiple rows in the zone, and to any other drift between octoDNS'
+        view of ``change.existing`` and the live INWX state.
+        """
+        canon_name = self._canon_name(name)
+        record_type = record_type.upper()
+        remaining = []
+        to_delete = []
+        for row in current_rows:
+            if (
+                self._canon_name(row.get("name")) == canon_name
+                and str(row.get("type") or "").upper() == record_type
+            ):
+                to_delete.append(row)
+            else:
+                remaining.append(row)
+        current_rows[:] = remaining
+        for row in to_delete:
+            self._client.delete_record(row["id"])
+
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)
         self._current_domain = domain
@@ -515,8 +539,11 @@ class INWXProvider(BaseProvider):
 
             for change in plan.changes:
                 if isinstance(change, Delete):
-                    payloads = self._record_to_api_payloads(change.existing)
-                    self._delete_record_payloads(current_rows, payloads)
+                    self._delete_all_rows_for(
+                        current_rows,
+                        self._to_inwx_name(change.existing.name),
+                        change.existing._type,
+                    )
                 elif isinstance(change, Create):
                     for payload in self._record_to_api_payloads(change.new):
                         self._client.create_record(domain, payload)

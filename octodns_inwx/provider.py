@@ -71,8 +71,12 @@ class INWXClient:
 
     def delete_record(self, record_id):
         self._ensure_logged_in()
+        # INWX record IDs exceed XML-RPC's 32-bit signed <int> range, which
+        # python's ``xmlrpc.client`` refuses to marshal. Send the id as a
+        # string -- the INWX API accepts either form.
         response = self._client.call_api(
-            api_method="nameserver.deleteRecord", method_params={"id": record_id}
+            api_method="nameserver.deleteRecord",
+            method_params={"id": str(record_id)},
         )
         self._ensure_success(response, "nameserver.deleteRecord")
         return response
@@ -474,7 +478,7 @@ class INWXProvider(BaseProvider):
                 row = fallback_row
             else:
                 continue
-            self._client.delete_record(int(row["id"]))
+            self._client.delete_record(row["id"])
 
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)

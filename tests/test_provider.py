@@ -521,7 +521,7 @@ class INWXClientTest(unittest.TestCase):
                         "ttl": 300,
                     },
                 ),
-                call(api_method="nameserver.deleteRecord", method_params={"id": 1}),
+                call(api_method="nameserver.deleteRecord", method_params={"id": "1"}),
             ],
             inner.call_api.call_args_list,
         )
@@ -732,6 +732,23 @@ class RecordToApiPayloadsMarshalTest(unittest.TestCase):
         )
         for payload in provider._record_to_api_payloads(record):
             self._assert_marshalable(payload)
+
+
+class DeleteRecordIdMarshalTest(unittest.TestCase):
+    """Regression test: INWX record IDs can exceed XML-RPC's 32-bit <int>."""
+
+    def test_delete_record_marshals_64bit_id(self):
+        import xmlrpc.client
+
+        big_id = 9876543210123
+        _, inner = INWXClientTest()._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 1000}
+        client = INWXClient("user", "pass")
+        client.delete_record(big_id)
+        params = inner.call_api.call_args.kwargs["method_params"]
+        self.assertEqual({"id": str(big_id)}, params)
+        # And the params dict must be marshalable end-to-end.
+        xmlrpc.client.dumps((params,), "nameserver.deleteRecord")
 
 
 if __name__ == "__main__":

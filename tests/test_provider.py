@@ -682,5 +682,57 @@ class INWXProviderTlsaTest(unittest.TestCase):
         self.assertTrue(provider._matches_payload(existing_row, payload))
 
 
+class RecordToApiPayloadsMarshalTest(unittest.TestCase):
+    """Ensure payload content is xmlrpc-marshalable (plain str, not typed values).
+
+    Regression test for the case where newer octodns versions return typed
+    value objects (e.g. ``CnameValue``) that ``xmlrpc.client`` cannot marshal.
+    """
+
+    def _assert_marshalable(self, payload):
+        import xmlrpc.client
+
+        xmlrpc.client.dumps((payload,))
+        self.assertIs(type(payload["content"]), str)
+
+    def test_cname_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "alias",
+            {"ttl": 600, "type": "CNAME", "value": "target.example.com."},
+        )
+        payload = provider._record_to_api_payloads(record)[0]
+        self._assert_marshalable(payload)
+
+    def test_a_aaaa_ns_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        for name, data in (
+            ("a", {"ttl": 600, "type": "A", "value": "1.2.3.4"}),
+            ("aaaa", {"ttl": 600, "type": "AAAA", "value": "::1"}),
+            ("ns", {"ttl": 600, "type": "NS", "value": "ns1.example.com."}),
+        ):
+            record = Record.new(zone, name, data)
+            for payload in provider._record_to_api_payloads(record):
+                self._assert_marshalable(payload)
+
+    def test_mx_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "mx",
+            {
+                "ttl": 600,
+                "type": "MX",
+                "value": {"preference": 10, "exchange": "mail.example.com."},
+            },
+        )
+        for payload in provider._record_to_api_payloads(record):
+            self._assert_marshalable(payload)
+
+
 if __name__ == "__main__":
     unittest.main()

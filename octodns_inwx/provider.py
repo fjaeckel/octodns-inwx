@@ -324,7 +324,7 @@ class INWXProvider(BaseProvider):
 
         if record_type in {"A", "AAAA", "NS"}:
             return [
-                {"name": name, "type": record_type, "content": value, "ttl": ttl}
+                {"name": name, "type": record_type, "content": str(value), "ttl": ttl}
                 for value in record.values
             ]
 
@@ -340,7 +340,14 @@ class INWXProvider(BaseProvider):
             ]
 
         if record_type == "CNAME":
-            return [{"name": name, "type": "CNAME", "content": record.value, "ttl": ttl}]
+            return [
+                {
+                    "name": name,
+                    "type": "CNAME",
+                    "content": str(record.value),
+                    "ttl": ttl,
+                }
+            ]
 
         if record_type == "MX":
             payloads = []
@@ -349,7 +356,7 @@ class INWXProvider(BaseProvider):
                     {
                         "name": name,
                         "type": "MX",
-                        "content": value.exchange,
+                        "content": str(value.exchange),
                         "ttl": ttl,
                         "prio": int(value.preference),
                     }

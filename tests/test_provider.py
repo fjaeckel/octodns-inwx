@@ -734,6 +734,43 @@ class RecordToApiPayloadsMarshalTest(unittest.TestCase):
             self._assert_marshalable(payload)
 
 
+class ApplyUpdateAgainstFqdnNamesTest(unittest.TestCase):
+    """INWX's ``nameserver.info`` returns names as FQDNs while the create
+    API takes short names. Make sure Update changes still match (and thus
+    delete) the existing row.
+    """
+
+    def test_update_deletes_existing_fqdn_named_row(self):
+        # Live state as INWX would return it: name is the FQDN, no trailing dot.
+        existing_row = {
+            "id": 42,
+            "name": "host.example.com",
+            "type": "A",
+            "content": "192.0.2.1",
+            "ttl": 3600,
+            "prio": 0,
+        }
+        client = FakeClient(records=[existing_row])
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        existing = Record.new(
+            zone, "host", {"ttl": 3600, "type": "A", "value": "192.0.2.1"}
+        )
+        new = Record.new(
+            zone, "host", {"ttl": 1800, "type": "A", "value": "192.0.2.2"}
+        )
+        plan = SimpleNamespace(
+            desired=zone, changes=[Update(existing=existing, new=new)]
+        )
+        provider._apply(plan)
+        self.assertEqual([42], client.deleted)
+        self.assertEqual(1, len(client.created))
+        _, payload = client.created[0]
+        self.assertEqual("host", payload["name"])
+        self.assertEqual(1800, payload["ttl"])
+        self.assertEqual("192.0.2.2", payload["content"])
+
+
 class DeleteRecordIdMarshalTest(unittest.TestCase):
     """Regression test: INWX record IDs can exceed XML-RPC's 32-bit <int>."""
 

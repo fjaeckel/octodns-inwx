@@ -146,6 +146,24 @@ class INWXProvider(BaseProvider):
     def _to_inwx_name(name):
         return "@" if name == "" else name
 
+    def _canon_name(self, name):
+        """Canonicalize an INWX record name for cross-format comparison.
+
+        INWX's ``nameserver.info`` returns names as FQDNs (e.g.
+        ``host.example.com``) while ``nameserver.createRecord`` accepts and
+        echoes the short form (``host`` or ``@`` for the apex). Both forms
+        must compare equal when matching list rows against payloads.
+        """
+        domain = getattr(self, "_current_domain", None)
+        name = (name or "").rstrip(".")
+        if domain and name == domain:
+            return ""
+        if domain and name.endswith(f".{domain}"):
+            name = name[: -(len(domain) + 1)]
+        if name in ("", "@"):
+            return ""
+        return name
+
     @staticmethod
     def _normalize_content(value):
         value = str(value)
@@ -416,7 +434,7 @@ class INWXProvider(BaseProvider):
         raise ProviderException(f"Unsupported record type {record_type}")
 
     def _matches_payload(self, row, payload):
-        if str(row.get("name") or "") != str(payload.get("name") or ""):
+        if self._canon_name(row.get("name")) != self._canon_name(payload.get("name")):
             return False
         record_type = str(payload.get("type") or "").upper()
         if str(row.get("type") or "").upper() != record_type:
@@ -461,11 +479,12 @@ class INWXProvider(BaseProvider):
         for payload in payloads:
             fallback_row = None
             match_index = None
+            payload_name = self._canon_name(payload.get("name"))
+            payload_type = str(payload.get("type") or "").upper()
             for index, row in enumerate(current_rows):
                 if (
-                    str(row.get("name") or "") == str(payload.get("name") or "")
-                    and str(row.get("type") or "").upper()
-                    == str(payload.get("type") or "").upper()
+                    self._canon_name(row.get("name")) == payload_name
+                    and str(row.get("type") or "").upper() == payload_type
                 ):
                     fallback_row = row
                     if self._matches_payload(row, payload):
@@ -482,6 +501,7 @@ class INWXProvider(BaseProvider):
 
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)
+        self._current_domain = domain
         try:
             current_rows = self._client.list_records(domain)
 
@@ -502,4 +522,5 @@ class INWXProvider(BaseProvider):
                         f"Unsupported change type {change.__class__.__name__}"
                     )
         finally:
+            self._current_domain = None
             self._cleanup_client()

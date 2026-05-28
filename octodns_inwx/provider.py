@@ -91,6 +91,7 @@ class INWXClient:
 class INWXProvider(BaseProvider):
     SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
+    SUPPORTS_ROOT_NS = True
     DEFAULT_TTL = 3600
 
     def __init__(

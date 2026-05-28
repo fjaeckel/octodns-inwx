@@ -71,11 +71,12 @@ class INWXClient:
 
     def delete_record(self, record_id):
         self._ensure_logged_in()
-        # INWX returns record ids as strings and they can exceed the XML-RPC
-        # <int> range (signed 32-bit). Forward the value as-is so xmlrpc.client
-        # marshals it as <string>, which the INWX backend accepts.
+        # INWX record IDs exceed XML-RPC's 32-bit signed <int> range, which
+        # python's ``xmlrpc.client`` refuses to marshal. Send the id as a
+        # string -- the INWX API accepts either form.
         response = self._client.call_api(
-            api_method="nameserver.deleteRecord", method_params={"id": str(record_id)}
+            api_method="nameserver.deleteRecord",
+            method_params={"id": str(record_id)},
         )
         self._ensure_success(response, "nameserver.deleteRecord")
         return response
@@ -94,6 +95,7 @@ class INWXClient:
 class INWXProvider(BaseProvider):
     SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
+    SUPPORTS_ROOT_NS = True
     DEFAULT_TTL = 3600
 
     def __init__(
@@ -143,6 +145,24 @@ class INWXProvider(BaseProvider):
     @staticmethod
     def _to_inwx_name(name):
         return "@" if name == "" else name
+
+    def _canon_name(self, name):
+        """Canonicalize an INWX record name for cross-format comparison.
+
+        INWX's ``nameserver.info`` returns names as FQDNs (e.g.
+        ``host.example.com``) while ``nameserver.createRecord`` accepts and
+        echoes the short form (``host`` or ``@`` for the apex). Both forms
+        must compare equal when matching list rows against payloads.
+        """
+        domain = getattr(self, "_current_domain", None)
+        name = (name or "").rstrip(".")
+        if domain and name == domain:
+            return ""
+        if domain and name.endswith(f".{domain}"):
+            name = name[: -(len(domain) + 1)]
+        if name in ("", "@"):
+            return ""
+        return name
 
     @staticmethod
     def _normalize_content(value):
@@ -300,15 +320,23 @@ class INWXProvider(BaseProvider):
         try:
             rows = self._client.list_records(domain)
             groups = defaultdict(list)
+            ttls = {}
             for row in rows:
                 record_type = str(row.get("type", "")).upper()
                 if record_type not in self.SUPPORTS:
                     continue
                 name = self._to_octodns_name(row.get("name"), domain)
                 ttl = int(row.get("ttl") or self.DEFAULT_TTL)
-                groups[(name, record_type, ttl)].append(row)
+                key = (name, record_type)
+                groups[key].append(row)
+                # If the same RRset has rows with different TTLs (legacy data
+                # or remnants from earlier buggy state), prefer the smallest
+                # so we converge towards the most aggressive cache eviction.
+                prev = ttls.get(key)
+                ttls[key] = ttl if prev is None else min(prev, ttl)
 
-            for (name, record_type, ttl), grouped_rows in sorted(groups.items()):
+            for (name, record_type), grouped_rows in sorted(groups.items()):
+                ttl = ttls[(name, record_type)]
                 data = self._record_data_from_group(record_type, ttl, grouped_rows)
                 if not data:
                     continue
@@ -326,7 +354,7 @@ class INWXProvider(BaseProvider):
 
         if record_type in {"A", "AAAA", "NS"}:
             return [
-                {"name": name, "type": record_type, "content": value, "ttl": ttl}
+                {"name": name, "type": record_type, "content": str(value), "ttl": ttl}
                 for value in record.values
             ]
 
@@ -342,7 +370,14 @@ class INWXProvider(BaseProvider):
             ]
 
         if record_type == "CNAME":
-            return [{"name": name, "type": "CNAME", "content": record.value, "ttl": ttl}]
+            return [
+                {
+                    "name": name,
+                    "type": "CNAME",
+                    "content": str(record.value),
+                    "ttl": ttl,
+                }
+            ]
 
         if record_type == "MX":
             payloads = []
@@ -351,7 +386,7 @@ class INWXProvider(BaseProvider):
                     {
                         "name": name,
                         "type": "MX",
-                        "content": value.exchange,
+                        "content": str(value.exchange),
                         "ttl": ttl,
                         "prio": int(value.preference),
                     }
@@ -406,25 +441,8 @@ class INWXProvider(BaseProvider):
 
         raise ProviderException(f"Unsupported record type {record_type}")
 
-    def _names_equal(self, row_name, payload_name, domain=None):
-        row = str(row_name or "").rstrip(".")
-        pay = str(payload_name or "").rstrip(".")
-        if row == pay:
-            return True
-        if domain is None:
-            return False
-        # nameserver.info returns the row's name as the full FQDN, while
-        # payloads built for nameserver.createRecord use the short form ('@'
-        # for the apex, otherwise the relative label). Translate the row to
-        # the same short form before comparing so deletes can find the right
-        # record.
-        row_apex = row == domain
-        if pay == "@":
-            return row_apex
-        return row == f"{pay}.{domain}"
-
-    def _matches_payload(self, row, payload, domain=None):
-        if not self._names_equal(row.get("name"), payload.get("name"), domain):
+    def _matches_payload(self, row, payload):
+        if self._canon_name(row.get("name")) != self._canon_name(payload.get("name")):
             return False
         record_type = str(payload.get("type") or "").upper()
         if str(row.get("type") or "").upper() != record_type:
@@ -465,20 +483,19 @@ class INWXProvider(BaseProvider):
             f"{cls._normalize_tlsa_data(cert_data)}"
         )
 
-    def _delete_record_payloads(self, current_rows, payloads, domain=None):
+    def _delete_record_payloads(self, current_rows, payloads):
         for payload in payloads:
             fallback_row = None
             match_index = None
+            payload_name = self._canon_name(payload.get("name"))
+            payload_type = str(payload.get("type") or "").upper()
             for index, row in enumerate(current_rows):
                 if (
-                    self._names_equal(
-                        row.get("name"), payload.get("name"), domain
-                    )
-                    and str(row.get("type") or "").upper()
-                    == str(payload.get("type") or "").upper()
+                    self._canon_name(row.get("name")) == payload_name
+                    and str(row.get("type") or "").upper() == payload_type
                 ):
                     fallback_row = row
-                    if self._matches_payload(row, payload, domain):
+                    if self._matches_payload(row, payload):
                         match_index = index
                         break
             if match_index is not None:
@@ -490,23 +507,49 @@ class INWXProvider(BaseProvider):
                 continue
             self._client.delete_record(row["id"])
 
+    def _delete_all_rows_for(self, current_rows, name, record_type):
+        """Delete every row of the given (name, type) regardless of content.
+
+        Used for ``Delete`` changes where the entire RRset is going away --
+        this is robust to single-valued types (CNAME) accidentally having
+        multiple rows in the zone, and to any other drift between octoDNS'
+        view of ``change.existing`` and the live INWX state.
+        """
+        canon_name = self._canon_name(name)
+        record_type = record_type.upper()
+        remaining = []
+        to_delete = []
+        for row in current_rows:
+            if (
+                self._canon_name(row.get("name")) == canon_name
+                and str(row.get("type") or "").upper() == record_type
+            ):
+                to_delete.append(row)
+            else:
+                remaining.append(row)
+        current_rows[:] = remaining
+        for row in to_delete:
+            self._client.delete_record(row["id"])
+
     def _apply(self, plan):
         domain = self._domain_for_zone(plan.desired)
+        self._current_domain = domain
         try:
             current_rows = self._client.list_records(domain)
 
             for change in plan.changes:
                 if isinstance(change, Delete):
-                    payloads = self._record_to_api_payloads(change.existing)
-                    self._delete_record_payloads(current_rows, payloads, domain)
+                    self._delete_all_rows_for(
+                        current_rows,
+                        self._to_inwx_name(change.existing.name),
+                        change.existing._type,
+                    )
                 elif isinstance(change, Create):
                     for payload in self._record_to_api_payloads(change.new):
                         self._client.create_record(domain, payload)
                 elif isinstance(change, Update):
                     existing_payloads = self._record_to_api_payloads(change.existing)
-                    self._delete_record_payloads(
-                        current_rows, existing_payloads, domain
-                    )
+                    self._delete_record_payloads(current_rows, existing_payloads)
                     for payload in self._record_to_api_payloads(change.new):
                         self._client.create_record(domain, payload)
                 else:
@@ -514,4 +557,5 @@ class INWXProvider(BaseProvider):
                         f"Unsupported change type {change.__class__.__name__}"
                     )
         finally:
+            self._current_domain = None
             self._cleanup_client()

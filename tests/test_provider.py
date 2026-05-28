@@ -730,5 +730,111 @@ class INWXProviderTlsaTest(unittest.TestCase):
         self.assertTrue(provider._matches_payload(existing_row, payload))
 
 
+class RecordToApiPayloadsMarshalTest(unittest.TestCase):
+    """Ensure payload content is xmlrpc-marshalable (plain str, not typed values).
+
+    Regression test for the case where newer octodns versions return typed
+    value objects (e.g. ``CnameValue``) that ``xmlrpc.client`` cannot marshal.
+    """
+
+    def _assert_marshalable(self, payload):
+        import xmlrpc.client
+
+        xmlrpc.client.dumps((payload,))
+        self.assertIs(type(payload["content"]), str)
+
+    def test_cname_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "alias",
+            {"ttl": 600, "type": "CNAME", "value": "target.example.com."},
+        )
+        payload = provider._record_to_api_payloads(record)[0]
+        self._assert_marshalable(payload)
+
+    def test_a_aaaa_ns_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        for name, data in (
+            ("a", {"ttl": 600, "type": "A", "value": "1.2.3.4"}),
+            ("aaaa", {"ttl": 600, "type": "AAAA", "value": "::1"}),
+            ("ns", {"ttl": 600, "type": "NS", "value": "ns1.example.com."}),
+        ):
+            record = Record.new(zone, name, data)
+            for payload in provider._record_to_api_payloads(record):
+                self._assert_marshalable(payload)
+
+    def test_mx_payload_content_is_plain_str(self):
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone,
+            "mx",
+            {
+                "ttl": 600,
+                "type": "MX",
+                "value": {"preference": 10, "exchange": "mail.example.com."},
+            },
+        )
+        for payload in provider._record_to_api_payloads(record):
+            self._assert_marshalable(payload)
+
+
+class ApplyUpdateAgainstFqdnNamesTest(unittest.TestCase):
+    """INWX's ``nameserver.info`` returns names as FQDNs while the create
+    API takes short names. Make sure Update changes still match (and thus
+    delete) the existing row.
+    """
+
+    def test_update_deletes_existing_fqdn_named_row(self):
+        # Live state as INWX would return it: name is the FQDN, no trailing dot.
+        existing_row = {
+            "id": 42,
+            "name": "host.example.com",
+            "type": "A",
+            "content": "192.0.2.1",
+            "ttl": 3600,
+            "prio": 0,
+        }
+        client = FakeClient(records=[existing_row])
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        existing = Record.new(
+            zone, "host", {"ttl": 3600, "type": "A", "value": "192.0.2.1"}
+        )
+        new = Record.new(
+            zone, "host", {"ttl": 1800, "type": "A", "value": "192.0.2.2"}
+        )
+        plan = SimpleNamespace(
+            desired=zone, changes=[Update(existing=existing, new=new)]
+        )
+        provider._apply(plan)
+        self.assertEqual([42], client.deleted)
+        self.assertEqual(1, len(client.created))
+        _, payload = client.created[0]
+        self.assertEqual("host", payload["name"])
+        self.assertEqual(1800, payload["ttl"])
+        self.assertEqual("192.0.2.2", payload["content"])
+
+
+class DeleteRecordIdMarshalTest(unittest.TestCase):
+    """Regression test: INWX record IDs can exceed XML-RPC's 32-bit <int>."""
+
+    def test_delete_record_marshals_64bit_id(self):
+        import xmlrpc.client
+
+        big_id = 9876543210123
+        _, inner = INWXClientTest()._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 1000}
+        client = INWXClient("user", "pass")
+        client.delete_record(big_id)
+        params = inner.call_api.call_args.kwargs["method_params"]
+        self.assertEqual({"id": str(big_id)}, params)
+        # And the params dict must be marshalable end-to-end.
+        xmlrpc.client.dumps((params,), "nameserver.deleteRecord")
+
+
 if __name__ == "__main__":
     unittest.main()

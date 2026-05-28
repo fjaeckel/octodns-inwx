@@ -320,15 +320,23 @@ class INWXProvider(BaseProvider):
         try:
             rows = self._client.list_records(domain)
             groups = defaultdict(list)
+            ttls = {}
             for row in rows:
                 record_type = str(row.get("type", "")).upper()
                 if record_type not in self.SUPPORTS:
                     continue
                 name = self._to_octodns_name(row.get("name"), domain)
                 ttl = int(row.get("ttl") or self.DEFAULT_TTL)
-                groups[(name, record_type, ttl)].append(row)
+                key = (name, record_type)
+                groups[key].append(row)
+                # If the same RRset has rows with different TTLs (legacy data
+                # or remnants from earlier buggy state), prefer the smallest
+                # so we converge towards the most aggressive cache eviction.
+                prev = ttls.get(key)
+                ttls[key] = ttl if prev is None else min(prev, ttl)
 
-            for (name, record_type, ttl), grouped_rows in sorted(groups.items()):
+            for (name, record_type), grouped_rows in sorted(groups.items()):
+                ttl = ttls[(name, record_type)]
                 data = self._record_data_from_group(record_type, ttl, grouped_rows)
                 if not data:
                     continue

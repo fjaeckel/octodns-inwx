@@ -329,6 +329,54 @@ class INWXProviderTest(unittest.TestCase):
         self.assertEqual(sorted([1, 2]), sorted(client.deleted))
         self.assertEqual([], client.created)
 
+    def test_apply_delete_matches_fqdn_row_names(self):
+        # Regression: nameserver.info returns each row's name as the full
+        # FQDN, while payloads built for nameserver.createRecord use the
+        # short relative form. The delete path must match across that
+        # boundary or it will silently no-op against a live INWX zone.
+        client = FakeClient(
+            records=[
+                {
+                    "id": 42,
+                    "name": "octodns-roundtrip-test.example.com",
+                    "type": "TXT",
+                    "content": "probe",
+                    "ttl": 300,
+                },
+                {
+                    "id": 43,
+                    "name": "example.com",
+                    "type": "MX",
+                    "content": "mx.example.net",
+                    "ttl": 300,
+                    "prio": 10,
+                },
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        sub = Record.new(
+            zone,
+            "octodns-roundtrip-test",
+            {"ttl": 300, "type": "TXT", "value": "probe"},
+        )
+        apex = Record.new(
+            zone,
+            "",
+            {
+                "ttl": 300,
+                "type": "MX",
+                "value": {"preference": 10, "value": "mx.example.net."},
+            },
+        )
+        plan = SimpleNamespace(
+            desired=zone, changes=[Delete(sub), Delete(apex)]
+        )
+
+        provider._apply(plan)
+
+        self.assertEqual(sorted([42, 43]), sorted(client.deleted))
+
     def test_apply_create_mx_includes_priority(self):
         client = FakeClient()
         provider = INWXProvider("inwx", client=client)

@@ -56,6 +56,9 @@ PTR records are managed the same way as any other record type, so reverse
 DNS zones (e.g. `2.0.192.in-addr.arpa.` or `...ip6.arpa.`) can be managed by
 octoDNS as long as the corresponding reverse zone is registered with INWX.
 
+Multi-value PTR records (multiple hostnames pointed at the same IP) are
+supported, since INWX itself allows storing more than one PTR row per name.
+
 #### Dynamic
 
 INWXProvider does not support dynamic records.

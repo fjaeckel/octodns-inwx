@@ -96,6 +96,12 @@ class INWXProvider(BaseProvider):
     SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "PTR", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
     SUPPORTS_ROOT_NS = True
+    # INWX happily stores multiple PTR rows for the same name (common for
+    # reverse zones with multiple hostnames pointed at one IP). octoDNS
+    # itself already models PTR as a multi-value record type -- this flag
+    # just tells octoDNS' base provider not to silently truncate a
+    # multi-value PTR record down to a single value during planning.
+    SUPPORTS_MULTIVALUE_PTR = True
     DEFAULT_TTL = 3600
 
     def __init__(

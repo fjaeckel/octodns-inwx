@@ -50,7 +50,11 @@ A dedicated API user with permission to manage the affected domains is recommend
 
 #### Records
 
-INWXProvider supports A, AAAA, CAA, CNAME, MX, NS, SRV, TLSA, and TXT.
+INWXProvider supports A, AAAA, CAA, CNAME, MX, NS, PTR, SRV, TLSA, and TXT.
+
+PTR records are managed the same way as any other record type, so reverse
+DNS zones (e.g. `2.0.192.in-addr.arpa.` or `...ip6.arpa.`) can be managed by
+octoDNS as long as the corresponding reverse zone is registered with INWX.
 
 #### Dynamic
 
@@ -75,3 +79,20 @@ Linting is run with:
 ```
 ruff check .
 ```
+
+### Releasing
+
+Releases are published to PyPI automatically by [.github/workflows/publish.yml](.github/workflows/publish.yml)
+whenever a `v*` tag is pushed. The workflow refuses to publish if the tag
+doesn't match the version in `pyproject.toml`, so the two must be bumped
+together:
+
+1. Update `version` in [pyproject.toml](pyproject.toml) (e.g. `0.1.2` -> `0.1.3`).
+2. Commit the bump, e.g. `git commit -am "Bump version to 0.1.3"`.
+3. Tag the commit to match, with a `v` prefix: `git tag v0.1.3`.
+4. Push both the commit and the tag: `git push && git push origin v0.1.3`.
+
+Pushing the tag triggers the workflow, which verifies the tag matches
+`pyproject.toml`, builds the sdist/wheel, and publishes to PyPI via trusted
+publishing (no manual credentials needed).
+

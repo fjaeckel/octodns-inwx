@@ -730,6 +730,81 @@ class INWXProviderTlsaTest(unittest.TestCase):
         self.assertTrue(provider._matches_payload(existing_row, payload))
 
 
+class INWXProviderPtrTest(unittest.TestCase):
+    def test_populate_loads_ptr_record(self):
+        client = FakeClient(
+            records=[
+                {
+                    "id": 1,
+                    "name": "1",
+                    "type": "PTR",
+                    "content": "host1.example.com",
+                    "ttl": 3600,
+                },
+                {
+                    "id": 2,
+                    "name": "1",
+                    "type": "PTR",
+                    "content": "host2.example.com",
+                    "ttl": 3600,
+                },
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+
+        provider.populate(zone)
+
+        records = {(r.name, r._type): r for r in zone.records}
+        record = records[("1", "PTR")]
+        self.assertEqual(
+            sorted(["host1.example.com.", "host2.example.com."]),
+            sorted(record.values),
+        )
+
+    def test_apply_create_ptr(self):
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+        record = Record.new(
+            zone,
+            "1",
+            {"ttl": 3600, "type": "PTR", "value": "host1.example.com."},
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Create(record)])
+
+        provider._apply(plan)
+
+        self.assertEqual(1, len(client.created))
+        domain, payload = client.created[0]
+        self.assertEqual("2.0.192.in-addr.arpa", domain)
+        self.assertEqual("1", payload["name"])
+        self.assertEqual("PTR", payload["type"])
+        self.assertEqual("host1.example.com.", payload["content"])
+        self.assertEqual(3600, payload["ttl"])
+
+    def test_apply_update_ptr_matches_dot_insensitive(self):
+        # INWX strips the trailing dot from the stored FQDN; the desired
+        # value uses the canonical form with a trailing dot. They represent
+        # the same record so matching must be dot-insensitive.
+        existing_row = {
+            "id": 9,
+            "name": "1",
+            "type": "PTR",
+            "content": "host1.example.com",
+            "ttl": 3600,
+        }
+        provider = INWXProvider("inwx", client=FakeClient(records=[existing_row]))
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+        existing = Record.new(
+            zone,
+            "1",
+            {"ttl": 3600, "type": "PTR", "value": "host1.example.com."},
+        )
+        payload = provider._record_to_api_payloads(existing)[0]
+        self.assertTrue(provider._matches_payload(existing_row, payload))
+
+
 class RecordToApiPayloadsMarshalTest(unittest.TestCase):
     """Ensure payload content is xmlrpc-marshalable (plain str, not typed values).
 
@@ -761,6 +836,7 @@ class RecordToApiPayloadsMarshalTest(unittest.TestCase):
             ("a", {"ttl": 600, "type": "A", "value": "1.2.3.4"}),
             ("aaaa", {"ttl": 600, "type": "AAAA", "value": "::1"}),
             ("ns", {"ttl": 600, "type": "NS", "value": "ns1.example.com."}),
+            ("ptr", {"ttl": 600, "type": "PTR", "value": "host.example.com."}),
         ):
             record = Record.new(zone, name, data)
             for payload in provider._record_to_api_payloads(record):

@@ -93,7 +93,7 @@ class INWXClient:
 
 
 class INWXProvider(BaseProvider):
-    SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "SRV", "TLSA", "TXT"}
+    SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "PTR", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
     SUPPORTS_ROOT_NS = True
     DEFAULT_TTL = 3600
@@ -209,10 +209,10 @@ class INWXProvider(BaseProvider):
                 "values": [str(row["content"]) for row in rows],
             }
 
-        if record_type == "NS":
+        if record_type in {"NS", "PTR"}:
             return {
                 "ttl": ttl,
-                "type": "NS",
+                "type": record_type,
                 "values": [self._ensure_fqdn(row["content"]) for row in rows],
             }
 
@@ -352,7 +352,7 @@ class INWXProvider(BaseProvider):
         record_type = record._type
         ttl = int(record.ttl)
 
-        if record_type in {"A", "AAAA", "NS"}:
+        if record_type in {"A", "AAAA", "NS", "PTR"}:
             return [
                 {"name": name, "type": record_type, "content": str(value), "ttl": ttl}
                 for value in record.values
@@ -459,7 +459,7 @@ class INWXProvider(BaseProvider):
         payload_content = self._normalize_content(payload.get("content"))
         # INWX returns FQDN-valued fields without the trailing dot it stripped on
         # write — compare in a dot-insensitive way for those types.
-        if record_type in {"CNAME", "MX", "NS"}:
+        if record_type in {"CNAME", "MX", "NS", "PTR"}:
             row_content = row_content.rstrip(".")
             payload_content = payload_content.rstrip(".")
         elif record_type == "SRV":

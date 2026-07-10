@@ -1,3 +1,5 @@
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
@@ -40,6 +42,21 @@ class INWXProviderTest(unittest.TestCase):
             INWXProvider("inwx", username="u")
         with self.assertRaises(ProviderException):
             INWXProvider("inwx", api_password="p")
+
+    def test_close_logs_out_owned_client(self):
+        api_client_mock = MagicMock()
+        inner = MagicMock()
+        inner.login.return_value = {"code": 1000}
+        inner.logout.return_value = {"code": 1000}
+        api_client_mock.return_value = inner
+        original = provider_module.ApiClient
+        provider_module.ApiClient = api_client_mock
+        self.addCleanup(setattr, provider_module, "ApiClient", original)
+
+        provider = INWXProvider("inwx", username="user", api_password="pass")
+        provider.close()
+
+        inner.logout.assert_called_once_with()
 
     def test_populate_loads_supported_records(self):
         client = FakeClient(
@@ -107,6 +124,24 @@ class INWXProviderTest(unittest.TestCase):
         self.assertEqual("issue", records[("", "CAA")].values[0].tag)
         self.assertEqual("letsencrypt.org", records[("", "CAA")].values[0].value)
         self.assertNotIn(("www", "UNKNOWN"), records)
+
+    def test_populate_does_not_logout_shared_client(self):
+        # octoDNS shares a single provider (and its client) across zones and,
+        # with max_workers > 1, calls populate() for them concurrently on
+        # separate threads. populate() must never log out the shared client
+        # when it finishes -- doing so would kill the session for any other
+        # zone still being populated on another thread.
+        client = FakeClient(
+            records=[
+                {"id": 1, "name": "www", "type": "A", "content": "192.0.2.10", "ttl": 300}
+            ]
+        )
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+
+        provider.populate(zone)
+
+        self.assertEqual(0, client.logout_calls)
 
     def test_populate_handles_cname_ns_and_aaaa(self):
         client = FakeClient(
@@ -277,6 +312,31 @@ class INWXProviderTest(unittest.TestCase):
             [("example.com", {"name": "@", "type": "TXT", "content": "hello world", "ttl": 300})],
             client.created,
         )
+
+    def test_apply_does_not_logout_shared_client(self):
+        # Same reasoning as test_populate_does_not_logout_shared_client:
+        # _apply() must leave the shared client's session alone.
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("example.com.", [])
+        record = Record.new(
+            zone, "www", {"ttl": 300, "type": "A", "value": "192.0.2.10"}
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Create(record)])
+
+        provider._apply(plan)
+
+        self.assertEqual(0, client.logout_calls)
+
+    def test_close_is_noop_when_client_was_injected(self):
+        # When a client is passed in explicitly, the provider doesn't own
+        # it and close() must not log it out from under the caller.
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+
+        provider.close()
+
+        self.assertEqual(0, client.logout_calls)
 
     def test_apply_create_txt_unescapes_semicolons(self):
         client = FakeClient()
@@ -605,6 +665,40 @@ class INWXClientTest(unittest.TestCase):
 
         with self.assertRaises(ProviderException):
             client.logout()
+
+    def test_concurrent_worker_calls_are_serialized(self):
+        # Regression test for the max_workers > 1 crash: octoDNS shares a
+        # single client across worker threads populating different zones
+        # concurrently. The client must serialize access to the underlying
+        # (stateful, session-based) API rather than let requests interleave.
+        _, inner = self._patched_client({"code": 1000})
+        in_flight = []
+        max_in_flight = []
+        tracking_lock = threading.Lock()
+
+        def call_api(api_method, method_params=None):
+            with tracking_lock:
+                in_flight.append(1)
+                max_in_flight.append(len(in_flight))
+            time.sleep(0.01)
+            with tracking_lock:
+                in_flight.pop()
+            return {"code": 1000, "resData": {"record": []}}
+
+        inner.call_api.side_effect = call_api
+        client = INWXClient("user", "pass")
+
+        threads = [
+            threading.Thread(target=client.list_records, args=(f"example{i}.com",))
+            for i in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(1, max(max_in_flight))
+        self.assertEqual(8, inner.call_api.call_count)
 
 
 class INWXProviderTlsaTest(unittest.TestCase):

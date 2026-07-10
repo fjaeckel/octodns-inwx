@@ -63,6 +63,18 @@ supported, since INWX itself allows storing more than one PTR row per name.
 
 INWXProvider does not support dynamic records.
 
+#### Concurrency (`max_workers`)
+
+octoDNS shares a single `INWXProvider`/session across all zones that use it,
+and runs `populate()` for those zones concurrently on separate threads when
+the manager's `max_workers` is greater than 1. The underlying INWX API is
+session-based, so the provider serializes all API calls internally and keeps
+the session logged in for the lifetime of the provider instead of logging
+out after each zone -- logging out early would kill the session for any
+other zone still in flight. If you need to explicitly close the session
+(e.g. at the end of a script that uses `INWXProvider` directly), call
+`provider.close()`.
+
 ### Development
 
 Install the package in editable mode along with the development tools:

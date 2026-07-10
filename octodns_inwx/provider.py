@@ -1,5 +1,6 @@
 import logging
 import re
+import threading
 from collections import defaultdict
 
 from octodns.provider import ProviderException
@@ -34,17 +35,25 @@ class INWXClient:
         self._api_password = api_password
         self._client = ApiClient(api_url=endpoint, debug_mode=False)
         self._logged_in = False
+        # octoDNS may run `populate()` for multiple zones concurrently across
+        # worker threads (``max_workers`` > 1) while all of them share this
+        # same client/session. Serialize state transitions (login/logout)
+        # and API calls so one worker can never observe or clobber another's
+        # in-flight session state.
+        self._lock = threading.RLock()
         self._login()
 
     def _login(self):
-        response = self._client.login(self._username, self._api_password)
-        self._ensure_success(response, "account.login")
-        self._logged_in = True
-        return response
+        with self._lock:
+            response = self._client.login(self._username, self._api_password)
+            self._ensure_success(response, "account.login")
+            self._logged_in = True
+            return response
 
     def _ensure_logged_in(self):
-        if not self._logged_in:
-            self._login()
+        with self._lock:
+            if not self._logged_in:
+                self._login()
 
     def _ensure_success(self, response, method):
         code = int(response.get("code", 0))
@@ -53,49 +62,59 @@ class INWXClient:
             raise ProviderException(f"{method} failed: {code} {message}")
 
     def list_records(self, domain):
-        self._ensure_logged_in()
-        response = self._client.call_api(
-            api_method="nameserver.info", method_params={"domain": domain}
-        )
+        with self._lock:
+            self._ensure_logged_in()
+            response = self._client.call_api(
+                api_method="nameserver.info", method_params={"domain": domain}
+            )
         self._ensure_success(response, "nameserver.info")
         return response.get("resData", {}).get("record", []) or []
 
     def create_record(self, domain, payload):
-        self._ensure_logged_in()
-        data = {"domain": domain, **payload}
-        response = self._client.call_api(
-            api_method="nameserver.createRecord", method_params=data
-        )
+        with self._lock:
+            self._ensure_logged_in()
+            data = {"domain": domain, **payload}
+            response = self._client.call_api(
+                api_method="nameserver.createRecord", method_params=data
+            )
         self._ensure_success(response, "nameserver.createRecord")
         return response
 
     def delete_record(self, record_id):
-        self._ensure_logged_in()
-        # INWX record IDs exceed XML-RPC's 32-bit signed <int> range, which
-        # python's ``xmlrpc.client`` refuses to marshal. Send the id as a
-        # string -- the INWX API accepts either form.
-        response = self._client.call_api(
-            api_method="nameserver.deleteRecord",
-            method_params={"id": str(record_id)},
-        )
+        with self._lock:
+            self._ensure_logged_in()
+            # INWX record IDs exceed XML-RPC's 32-bit signed <int> range,
+            # which python's ``xmlrpc.client`` refuses to marshal. Send the
+            # id as a string -- the INWX API accepts either form.
+            response = self._client.call_api(
+                api_method="nameserver.deleteRecord",
+                method_params={"id": str(record_id)},
+            )
         self._ensure_success(response, "nameserver.deleteRecord")
         return response
 
     def logout(self):
-        if not self._logged_in:
-            return None
-        response = self._client.logout()
-        code = int(response.get("code", 0))
-        if code not in self.LOGOUT_SUCCESS_CODES:
-            self._ensure_success(response, "account.logout")
-        self._logged_in = False
-        return response
+        with self._lock:
+            if not self._logged_in:
+                return None
+            response = self._client.logout()
+            code = int(response.get("code", 0))
+            if code not in self.LOGOUT_SUCCESS_CODES:
+                self._ensure_success(response, "account.logout")
+            self._logged_in = False
+            return response
 
 
 class INWXProvider(BaseProvider):
     SUPPORTS = {"A", "AAAA", "CAA", "CNAME", "MX", "NS", "PTR", "SRV", "TLSA", "TXT"}
     SUPPORTS_GEO = False
     SUPPORTS_ROOT_NS = True
+    # INWX happily stores multiple PTR rows for the same name (common for
+    # reverse zones with multiple hostnames pointed at one IP). octoDNS
+    # itself already models PTR as a multi-value record type -- this flag
+    # just tells octoDNS' base provider not to silently truncate a
+    # multi-value PTR record down to a single value during planning.
+    SUPPORTS_MULTIVALUE_PTR = True
     DEFAULT_TTL = 3600
 
     def __init__(
@@ -122,7 +141,19 @@ class INWXProvider(BaseProvider):
                 username=username, api_password=api_password, endpoint=endpoint
             )
 
-    def _cleanup_client(self):
+    def close(self):
+        """Explicitly log out of the INWX session, if this provider owns it.
+
+        octoDNS shares a single provider instance across all zones and, when
+        ``max_workers`` > 1, runs ``populate()`` for those zones concurrently
+        on separate threads. ``populate()``/``_apply()`` therefore must NOT
+        log out the shared client when they finish -- doing so would yank
+        the session out from under any other zone still in flight. Instead
+        the session is kept alive for the lifetime of the provider and it is
+        the caller's responsibility to invoke ``close()`` once all work
+        (typically an entire ``octodns-sync`` run) is done, if explicit
+        logout is desired.
+        """
         if not self._owns_client:
             return
         logout = getattr(self._client, "logout", None)
@@ -316,36 +347,37 @@ class INWXProvider(BaseProvider):
         return None
 
     def populate(self, zone, target=False, lenient=False):
+        # Note: the underlying client/session is intentionally left logged
+        # in when this returns -- see `close()` for why. octoDNS may be
+        # populating other zones concurrently on other threads using this
+        # same shared provider instance.
         domain = self._domain_for_zone(zone)
-        try:
-            rows = self._client.list_records(domain)
-            groups = defaultdict(list)
-            ttls = {}
-            for row in rows:
-                record_type = str(row.get("type", "")).upper()
-                if record_type not in self.SUPPORTS:
-                    continue
-                name = self._to_octodns_name(row.get("name"), domain)
-                ttl = int(row.get("ttl") or self.DEFAULT_TTL)
-                key = (name, record_type)
-                groups[key].append(row)
-                # If the same RRset has rows with different TTLs (legacy data
-                # or remnants from earlier buggy state), prefer the smallest
-                # so we converge towards the most aggressive cache eviction.
-                prev = ttls.get(key)
-                ttls[key] = ttl if prev is None else min(prev, ttl)
+        rows = self._client.list_records(domain)
+        groups = defaultdict(list)
+        ttls = {}
+        for row in rows:
+            record_type = str(row.get("type", "")).upper()
+            if record_type not in self.SUPPORTS:
+                continue
+            name = self._to_octodns_name(row.get("name"), domain)
+            ttl = int(row.get("ttl") or self.DEFAULT_TTL)
+            key = (name, record_type)
+            groups[key].append(row)
+            # If the same RRset has rows with different TTLs (legacy data
+            # or remnants from earlier buggy state), prefer the smallest
+            # so we converge towards the most aggressive cache eviction.
+            prev = ttls.get(key)
+            ttls[key] = ttl if prev is None else min(prev, ttl)
 
-            for (name, record_type), grouped_rows in sorted(groups.items()):
-                ttl = ttls[(name, record_type)]
-                data = self._record_data_from_group(record_type, ttl, grouped_rows)
-                if not data:
-                    continue
-                record = Record.new(zone, name, data, source=self, lenient=lenient)
-                zone.add_record(record, lenient=lenient)
+        for (name, record_type), grouped_rows in sorted(groups.items()):
+            ttl = ttls[(name, record_type)]
+            data = self._record_data_from_group(record_type, ttl, grouped_rows)
+            if not data:
+                continue
+            record = Record.new(zone, name, data, source=self, lenient=lenient)
+            zone.add_record(record, lenient=lenient)
 
-            return True
-        finally:
-            self._cleanup_client()
+        return True
 
     def _record_to_api_payloads(self, record):
         name = self._to_inwx_name(record.name)
@@ -557,5 +589,6 @@ class INWXProvider(BaseProvider):
                         f"Unsupported change type {change.__class__.__name__}"
                     )
         finally:
+            # Note: the underlying client/session is intentionally left
+            # logged in -- see `close()`.
             self._current_domain = None
-            self._cleanup_client()

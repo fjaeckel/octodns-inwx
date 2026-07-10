@@ -898,6 +898,157 @@ class INWXProviderPtrTest(unittest.TestCase):
         payload = provider._record_to_api_payloads(existing)[0]
         self.assertTrue(provider._matches_payload(existing_row, payload))
 
+    def test_supports_multivalue_ptr_flag_is_set(self):
+        # octoDNS' BaseProvider silently truncates multi-value PTR records
+        # down to a single value during `_process_desired_zone` unless a
+        # provider opts in via this flag. INWX happily stores multiple PTR
+        # rows for the same name, so it must be enabled.
+        self.assertTrue(INWXProvider.SUPPORTS_MULTIVALUE_PTR)
+
+    def test_process_desired_zone_keeps_multivalue_ptr(self):
+        # Regression test for the octoDNS base-provider behavior: without
+        # SUPPORTS_MULTIVALUE_PTR = True, `_process_desired_zone` would
+        # replace a multi-value PTR record with just `record.value`.
+        provider = INWXProvider("inwx", client=FakeClient())
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+        record = Record.new(
+            zone,
+            "1",
+            {
+                "ttl": 3600,
+                "type": "PTR",
+                "values": ["host1.example.com.", "host2.example.com."],
+            },
+        )
+        zone.add_record(record)
+
+        processed = provider._process_desired_zone(zone)
+
+        processed_record = {(r.name, r._type): r for r in processed.records}[
+            ("1", "PTR")
+        ]
+        self.assertEqual(
+            sorted(["host1.example.com.", "host2.example.com."]),
+            sorted(processed_record.values),
+        )
+
+    def test_apply_create_multivalue_ptr(self):
+        client = FakeClient()
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+        record = Record.new(
+            zone,
+            "1",
+            {
+                "ttl": 3600,
+                "type": "PTR",
+                "values": ["host1.example.com.", "host2.example.com."],
+            },
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Create(record)])
+
+        provider._apply(plan)
+
+        self.assertEqual(2, len(client.created))
+        contents = sorted(payload["content"] for _, payload in client.created)
+        self.assertEqual(
+            ["host1.example.com.", "host2.example.com."], contents
+        )
+        for _, payload in client.created:
+            self.assertEqual("1", payload["name"])
+            self.assertEqual("PTR", payload["type"])
+            self.assertEqual(3600, payload["ttl"])
+
+    def test_apply_update_multivalue_ptr_add_and_remove_value(self):
+        # Existing has host1 and host2; desired swaps host2 for host3.
+        # Updates delete every existing row for the RRset and recreate the
+        # full desired set (same pattern used for other multi-value types
+        # like A/AAAA).
+        existing_rows = [
+            {
+                "id": 1,
+                "name": "1",
+                "type": "PTR",
+                "content": "host1.example.com",
+                "ttl": 3600,
+            },
+            {
+                "id": 2,
+                "name": "1",
+                "type": "PTR",
+                "content": "host2.example.com",
+                "ttl": 3600,
+            },
+        ]
+        client = FakeClient(records=existing_rows)
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+
+        existing = Record.new(
+            zone,
+            "1",
+            {
+                "ttl": 3600,
+                "type": "PTR",
+                "values": ["host1.example.com.", "host2.example.com."],
+            },
+        )
+        new = Record.new(
+            zone,
+            "1",
+            {
+                "ttl": 3600,
+                "type": "PTR",
+                "values": ["host1.example.com.", "host3.example.com."],
+            },
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Update(existing, new)])
+
+        provider._apply(plan)
+
+        self.assertEqual(sorted([1, 2]), sorted(client.deleted))
+        self.assertEqual(2, len(client.created))
+        contents = sorted(payload["content"] for _, payload in client.created)
+        self.assertEqual(
+            ["host1.example.com.", "host3.example.com."], contents
+        )
+
+    def test_apply_delete_multivalue_ptr_removes_all_rows(self):
+        existing_rows = [
+            {
+                "id": 1,
+                "name": "1",
+                "type": "PTR",
+                "content": "host1.example.com",
+                "ttl": 3600,
+            },
+            {
+                "id": 2,
+                "name": "1",
+                "type": "PTR",
+                "content": "host2.example.com",
+                "ttl": 3600,
+            },
+        ]
+        client = FakeClient(records=existing_rows)
+        provider = INWXProvider("inwx", client=client)
+        zone = Zone("2.0.192.in-addr.arpa.", [])
+
+        existing = Record.new(
+            zone,
+            "1",
+            {
+                "ttl": 3600,
+                "type": "PTR",
+                "values": ["host1.example.com.", "host2.example.com."],
+            },
+        )
+        plan = SimpleNamespace(desired=zone, changes=[Delete(existing)])
+
+        provider._apply(plan)
+
+        self.assertEqual(sorted([1, 2]), sorted(client.deleted))
+
 
 class RecordToApiPayloadsMarshalTest(unittest.TestCase):
     """Ensure payload content is xmlrpc-marshalable (plain str, not typed values).

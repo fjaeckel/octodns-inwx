@@ -42,9 +42,22 @@ providers:
     api_password: env/INWX_PASSWORD
     # API endpoint base URL (optional, defaults to the production endpoint)
     #endpoint: https://api.domrobot.com
+    # How many times to retry a transient API failure (optional, default 4)
+    #retries: 4
+    # Base seconds for the exponential retry backoff (optional, default 2.0)
+    #retry_backoff: 2.0
 ```
 
 A dedicated API user with permission to manage the affected domains is recommended.
+
+#### Rate limiting
+
+Large plans (many deletes, or a zone with dozens of changes) can trip INWX'
+account-level rate limiting, which surfaces as a generic
+`2400 Command failed` on any API method. The provider retries those with an
+exponential backoff — raise `retries`/`retry_backoff` if bulk applies still
+fail. The backoff pauses every worker, not just the one that was throttled,
+since the limit applies to the account rather than the connection.
 
 ### Support Information
 

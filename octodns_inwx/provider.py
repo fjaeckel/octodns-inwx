@@ -1,6 +1,7 @@
 import logging
 import re
 import threading
+import time
 from collections import defaultdict
 
 from octodns.provider import ProviderException
@@ -21,20 +22,36 @@ DEFAULT_ENDPOINT = getattr(ApiClient, "API_LIVE_URL", API_LIVE_URL)
 class INWXClient:
     SUCCESS_CODE = 1000
     LOGOUT_SUCCESS_CODES = {SUCCESS_CODE, 1500}
+    # 2400 ("Command failed") is INWX' catch-all for a server-side failure and
+    # is what a burst of writes trips into once their rate limiting kicks in --
+    # a plan with dozens of changes per zone hits it reliably. 2500 means the
+    # session went away underneath us. Both clear on a retry; everything else
+    # (bad data, missing object, auth) will not, so it fails fast.
+    RETRYABLE_CODES = {2400, 2500}
+    # Codes that mean the current session is no longer usable, so the next
+    # attempt has to log in again before retrying.
+    SESSION_EXPIRED_CODES = {2200, 2500}
+    DEFAULT_RETRIES = 4
+    DEFAULT_RETRY_BACKOFF = 2.0
 
     def __init__(
         self,
         username,
         api_password,
         endpoint=DEFAULT_ENDPOINT,
+        retries=DEFAULT_RETRIES,
+        retry_backoff=DEFAULT_RETRY_BACKOFF,
     ):
         if ApiClient is None:
             raise ProviderException("inwx-domrobot dependency is required")
 
+        self.log = logging.getLogger("INWXClient")
         self._username = username
         self._api_password = api_password
         self._client = ApiClient(api_url=endpoint, debug_mode=False)
         self._logged_in = False
+        self._retries = int(retries)
+        self._retry_backoff = float(retry_backoff)
         # octoDNS may run `populate()` for multiple zones concurrently across
         # worker threads (``max_workers`` > 1) while all of them share this
         # same client/session. Serialize state transitions (login/logout)
@@ -55,43 +72,80 @@ class INWXClient:
             if not self._logged_in:
                 self._login()
 
+    @staticmethod
+    def _describe_error(response):
+        """Build the most informative message the response allows.
+
+        ``msg`` alone is often just "Command failed", which says nothing about
+        why. INWX puts the actual detail in ``reason``/``reasonCode`` when it
+        has any, so surface those too rather than discarding them.
+        """
+        parts = [str(response.get("msg") or "unknown INWX API error")]
+        reason_code = response.get("reasonCode")
+        if reason_code:
+            parts.append(f"reasonCode={reason_code}")
+        reason = response.get("reason")
+        if reason:
+            parts.append(f"reason={reason}")
+        return "; ".join(parts)
+
     def _ensure_success(self, response, method):
         code = int(response.get("code", 0))
         if code != self.SUCCESS_CODE:
-            message = response.get("msg", "unknown INWX API error")
-            raise ProviderException(f"{method} failed: {code} {message}")
+            raise ProviderException(
+                f"{method} failed: {code} {self._describe_error(response)}"
+            )
+
+    def _call(self, api_method, method_params, _sleep=time.sleep):
+        """Call the API, retrying transient failures with exponential backoff.
+
+        The lock is deliberately held across the backoff sleeps: INWX rate
+        limits the account, not the connection, so when one worker backs off
+        every worker needs to back off with it. Letting the others keep
+        hammering during the pause would just keep the limiter tripped.
+        """
+        with self._lock:
+            attempt = 0
+            while True:
+                self._ensure_logged_in()
+                response = self._client.call_api(
+                    api_method=api_method, method_params=method_params
+                )
+                code = int(response.get("code", 0))
+                if code == self.SUCCESS_CODE:
+                    return response
+
+                if code in self.SESSION_EXPIRED_CODES:
+                    self._logged_in = False
+
+                if code not in self.RETRYABLE_CODES or attempt >= self._retries:
+                    self._ensure_success(response, api_method)
+
+                delay = self._retry_backoff * (2**attempt)
+                attempt += 1
+                self.log.warning(
+                    "%s failed with %d (%s), retrying in %.1fs (attempt %d/%d)",
+                    api_method,
+                    code,
+                    self._describe_error(response),
+                    delay,
+                    attempt,
+                    self._retries,
+                )
+                _sleep(delay)
 
     def list_records(self, domain):
-        with self._lock:
-            self._ensure_logged_in()
-            response = self._client.call_api(
-                api_method="nameserver.info", method_params={"domain": domain}
-            )
-        self._ensure_success(response, "nameserver.info")
+        response = self._call("nameserver.info", {"domain": domain})
         return response.get("resData", {}).get("record", []) or []
 
     def create_record(self, domain, payload):
-        with self._lock:
-            self._ensure_logged_in()
-            data = {"domain": domain, **payload}
-            response = self._client.call_api(
-                api_method="nameserver.createRecord", method_params=data
-            )
-        self._ensure_success(response, "nameserver.createRecord")
-        return response
+        return self._call("nameserver.createRecord", {"domain": domain, **payload})
 
     def delete_record(self, record_id):
-        with self._lock:
-            self._ensure_logged_in()
-            # INWX record IDs exceed XML-RPC's 32-bit signed <int> range,
-            # which python's ``xmlrpc.client`` refuses to marshal. Send the
-            # id as a string -- the INWX API accepts either form.
-            response = self._client.call_api(
-                api_method="nameserver.deleteRecord",
-                method_params={"id": str(record_id)},
-            )
-        self._ensure_success(response, "nameserver.deleteRecord")
-        return response
+        # INWX record IDs exceed XML-RPC's 32-bit signed <int> range, which
+        # python's ``xmlrpc.client`` refuses to marshal. Send the id as a
+        # string -- the INWX API accepts either form.
+        return self._call("nameserver.deleteRecord", {"id": str(record_id)})
 
     def logout(self):
         with self._lock:
@@ -124,6 +178,8 @@ class INWXProvider(BaseProvider):
         api_password=None,
         endpoint=DEFAULT_ENDPOINT,
         client=None,
+        retries=INWXClient.DEFAULT_RETRIES,
+        retry_backoff=INWXClient.DEFAULT_RETRY_BACKOFF,
         *args,
         **kwargs,
     ):
@@ -138,7 +194,11 @@ class INWXProvider(BaseProvider):
                     "username and api_password are required when no client is provided"
                 )
             self._client = INWXClient(
-                username=username, api_password=api_password, endpoint=endpoint
+                username=username,
+                api_password=api_password,
+                endpoint=endpoint,
+                retries=retries,
+                retry_backoff=retry_backoff,
             )
 
     def close(self):

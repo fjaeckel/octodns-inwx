@@ -637,9 +637,73 @@ class INWXClientTest(unittest.TestCase):
     def test_api_failure_in_list_raises(self):
         _, inner = self._patched_client({"code": 1000})
         inner.call_api.return_value = {"code": 2400, "msg": "boom"}
-        client = INWXClient("user", "pass")
+        client = INWXClient("user", "pass", retries=0)
         with self.assertRaises(ProviderException):
             client.list_records("example.com")
+
+    def test_transient_failure_is_retried(self):
+        # Regression test for bulk applies: INWX rate limits a burst of
+        # writes with a generic 2400 that clears on a retry.
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.side_effect = [
+            {"code": 2400, "msg": "Command failed"},
+            {"code": 2400, "msg": "Command failed"},
+            {"code": 1000},
+        ]
+        client = INWXClient("user", "pass", retry_backoff=0.01)
+
+        client.delete_record(12345678901)
+
+        self.assertEqual(3, inner.call_api.call_count)
+
+    def test_retries_are_bounded(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 2400, "msg": "Command failed"}
+        client = INWXClient("user", "pass", retries=2, retry_backoff=0.01)
+
+        with self.assertRaises(ProviderException):
+            client.delete_record(1)
+
+        self.assertEqual(3, inner.call_api.call_count)
+
+    def test_non_retryable_failure_fails_fast(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.return_value = {"code": 2303, "msg": "Object does not exist"}
+        client = INWXClient("user", "pass", retry_backoff=0.01)
+
+        with self.assertRaises(ProviderException):
+            client.delete_record(1)
+
+        self.assertEqual(1, inner.call_api.call_count)
+
+    def test_expired_session_triggers_relogin_before_retry(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.side_effect = [
+            {"code": 2500, "msg": "Command failed; server closing connection"},
+            {"code": 1000},
+        ]
+        client = INWXClient("user", "pass", retry_backoff=0.01)
+
+        client.delete_record(1)
+
+        self.assertEqual(2, inner.login.call_count)
+
+    def test_error_message_includes_reason_detail(self):
+        _, inner = self._patched_client({"code": 1000})
+        inner.call_api.return_value = {
+            "code": 2400,
+            "msg": "Command failed",
+            "reasonCode": "ratelimit",
+            "reason": "too many requests",
+        }
+        client = INWXClient("user", "pass", retries=0)
+
+        with self.assertRaises(ProviderException) as ctx:
+            client.delete_record(1)
+
+        message = str(ctx.exception)
+        self.assertIn("ratelimit", message)
+        self.assertIn("too many requests", message)
 
     def test_logout_allows_future_relogin(self):
         _, inner = self._patched_client({"code": 1000})
